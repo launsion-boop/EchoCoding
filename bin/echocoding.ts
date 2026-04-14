@@ -7,6 +7,7 @@ import { installClaudeCode, uninstallClaudeCode, installCodex, uninstallCodex, d
 import { getConfig, setConfigValue, getConfigValue, ensureConfigDir, saveConfig } from '../src/config.js';
 import { playSfx } from '../src/engines/sfx-engine.js';
 import { checkModels, downloadModels, hasEssentialModels } from '../src/downloader.js';
+import { checkSystemDeps, installMissingDeps } from '../src/deps.js';
 import { startStudio } from '../src/studio/server.js';
 import { fork } from 'node:child_process';
 import path from 'node:path';
@@ -38,6 +39,30 @@ program
     }
 
     console.log(`[echocoding] Detected agents: ${agents.join(', ')}`);
+
+    // Check & install system dependencies (sox, etc.)
+    console.log();
+    const deps = checkSystemDeps();
+    const missing = deps.filter((d) => !d.installed);
+    if (missing.length > 0) {
+      console.log('[echocoding] Missing system dependencies:');
+      for (const d of missing) {
+        console.log(`  ✗ ${d.name} — ${d.purpose}`);
+      }
+      console.log();
+      const failed = await installMissingDeps(deps);
+      if (failed.length > 0) {
+        console.log('[echocoding] Could not auto-install:');
+        for (const d of failed) {
+          console.log(`  ✗ ${d.name}: ${d.installHint}`);
+        }
+        console.log();
+      } else {
+        console.log('[echocoding] All system dependencies installed.');
+      }
+    } else {
+      console.log('[echocoding] System dependencies: OK');
+    }
 
     if (agents.includes('claude-code')) {
       const result = installClaudeCode();
@@ -347,6 +372,24 @@ program
   .action(async (opts) => {
     const port = opts.port ? parseInt(opts.port, 10) : undefined;
     await startStudio(port);
+  });
+
+// --- mcp ---
+program
+  .command('mcp')
+  .description('Start MCP server (stdio transport) for Cursor/Windsurf/Gemini integration')
+  .action(async () => {
+    const { startMcpServer } = await import('../src/mcp/server.js');
+    await startMcpServer();
+  });
+
+// --- doctor ---
+program
+  .command('doctor')
+  .description('Check system health: daemon, audio, models, adapters')
+  .action(async () => {
+    const { runDoctor } = await import('../src/doctor.js');
+    await runDoctor();
   });
 
 program.parse();

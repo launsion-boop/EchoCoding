@@ -3,6 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { getConfig } from '../config.js';
+import { playSfx } from './sfx-engine.js';
 
 const TEMP_DIR = path.join(os.tmpdir(), 'echocoding-asr');
 
@@ -66,6 +67,10 @@ export async function ask(question: string, timeoutSec?: number): Promise<string
 // --- Local ASR via sherpa-onnx-node ---
 
 async function listenLocal(timeoutSec: number): Promise<string> {
+  // Play mic-ready beep (walkie-talkie style)
+  playSfx('mic-ready');
+  await new Promise((r) => setTimeout(r, 300));
+
   // Step 1: Record audio from microphone
   const audioFile = await recordMicrophone(timeoutSec);
   if (!audioFile) {
@@ -104,13 +109,16 @@ async function recordMicrophone(timeoutSec: number): Promise<string | null> {
     if (platform === 'darwin' || platform === 'linux') {
       // Use sox 'rec' if available, otherwise arecord
       // rec outputs 16kHz mono WAV, stops after silence or timeout
+      // Record fixed duration, output standard PCM 16-bit WAV
+      // (sherpa-onnx requires subchunk1_size=16, i.e. plain PCM format)
       child = spawn('rec', [
+        '-t', 'wav',         // output WAV
+        '-e', 'signed-integer', // PCM signed int
+        '-b', '16',          // 16-bit
         outFile,
         'rate', '16000',
         'channels', '1',
-        'silence', '1', '0.1', '3%',    // start recording on sound
-        '1', '1.5', '3%',               // stop after 1.5s of silence
-        'trim', '0', String(timeoutSec), // max duration
+        'trim', '0', String(timeoutSec),
       ], {
         stdio: 'ignore',
       });

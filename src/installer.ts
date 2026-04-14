@@ -23,7 +23,9 @@ const CLAUDE_SETTINGS_PATH = path.join(os.homedir(), '.claude', 'settings.json')
 
 function getHookCommand(): string {
   const hookScript = path.join(getPackageRoot(), 'dist', 'bin', 'echocoding-hook.js');
-  return `node ${hookScript}`;
+  // Use absolute path to node — hook env may not have /opt/homebrew/bin in PATH
+  const nodePath = process.execPath;
+  return `${nodePath} ${hookScript}`;
 }
 
 /**

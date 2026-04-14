@@ -225,8 +225,9 @@ const SOUNDS: SoundGenerator[] = [
   {
     name: 'typing',
     generate: () => {
-      // 5-8 keystrokes in quick succession — for Edit tool (editing code)
-      return typingSequence(6, 0.07, 0.2);
+      // Burst of rapid keystrokes — loops every ~1s for Edit tool ambient
+      // More keystrokes, tighter intervals, varied volume = realistic keyboard
+      return typingSequence(12, 0.055, 0.15);
     },
   },
 

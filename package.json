@@ -43,9 +43,11 @@
     "url": "https://github.com/EchoClaw/echocoding/issues"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "commander": "^14.0.3",
     "sherpa-onnx-node": "^1.12.38",
-    "yaml": "^2.8.3"
+    "yaml": "^2.8.3",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",

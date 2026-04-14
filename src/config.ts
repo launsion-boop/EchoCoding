@@ -105,7 +105,7 @@ const DEFAULT_CONFIG: EchoConfig = {
       endpoint: 'https://api.echoclaw.com/v1/asr',
       apiKey: '',
     },
-    timeout: 15,
+    timeout: 6,
   },
   sfx: {
     enabled: true,

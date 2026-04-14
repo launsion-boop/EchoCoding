@@ -4,7 +4,7 @@ import { getConfig, ensureConfigDir } from '../config.js';
 import { playSfx } from '../engines/sfx-engine.js';
 import { speak, cleanupTempFiles, disposeTts } from '../engines/voice-engine.js';
 import { listen, ask, disposeAsr } from '../engines/asr-engine.js';
-import { handleHookEvent, parseHookEvent } from '../hook-handler.js';
+import { handleHookEvent, parseHookEvent, setAmbientControls } from '../hook-handler.js';
 import { resetThrottle } from '../throttle.js';
 
 interface DaemonMessage {
@@ -15,6 +15,31 @@ interface DaemonMessage {
 }
 
 let server: net.Server | null = null;
+
+// --- Ambient loop state ---
+let ambientInterval: ReturnType<typeof setInterval> | null = null;
+let ambientName: string | null = null;
+
+/**
+ * Start looping an SFX at a fixed interval (e.g. thinking sound while idle).
+ * Calling again with a different name switches the ambient; same name is a no-op.
+ */
+export function startAmbient(sfxName: string, intervalMs = 3500): void {
+  if (ambientName === sfxName && ambientInterval) return; // already playing
+  stopAmbient();
+  ambientName = sfxName;
+  playSfx(sfxName); // play immediately
+  ambientInterval = setInterval(() => playSfx(sfxName), intervalMs);
+}
+
+/** Stop any running ambient loop. */
+export function stopAmbient(): void {
+  if (ambientInterval) {
+    clearInterval(ambientInterval);
+    ambientInterval = null;
+  }
+  ambientName = null;
+}
 
 export function startDaemon(): void {
   const config = getConfig();
@@ -66,6 +91,9 @@ export function startDaemon(): void {
     });
   });
 
+  // Wire up ambient controls so hook-handler can start/stop ambient loops
+  setAmbientControls(startAmbient, stopAmbient);
+
   server.listen(socketPath, () => {
     // Write PID file
     fs.writeFileSync(pidFile, String(process.pid));
@@ -85,6 +113,7 @@ export function startDaemon(): void {
   // Graceful shutdown
   const cleanup = () => {
     console.log('\n[echocoding] Shutting down...');
+    stopAmbient();
     server?.close();
     try { fs.unlinkSync(socketPath); } catch { /* ignore */ }
     try { fs.unlinkSync(pidFile); } catch { /* ignore */ }

@@ -30,6 +30,8 @@ const FALLBACK_CHAINS: Record<string, string[]> = {
   'agent-done': ['agent-done', 'success'],
   'delete': ['delete', 'error'],
   'install': ['install', 'success'],
+  'heartbeat': ['heartbeat', 'notification'],
+  'mic-ready': ['mic-ready', 'notification'],
 };
 
 const SUPPORTED_EXTENSIONS = ['.mp3', '.wav', '.ogg', '.m4a', '.aiff'];

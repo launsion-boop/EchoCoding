@@ -1,5 +1,17 @@
 import { playSfx } from './engines/sfx-engine.js';
 
+// Ambient control — injected by daemon at init time
+let _startAmbient: ((name: string, intervalMs?: number) => void) | null = null;
+let _stopAmbient: (() => void) | null = null;
+
+export function setAmbientControls(
+  start: (name: string, intervalMs?: number) => void,
+  stop: () => void,
+): void {
+  _startAmbient = start;
+  _stopAmbient = stop;
+}
+
 /**
  * Claude Code hook event data structure.
  * Hooks receive JSON on stdin with event details.
@@ -8,7 +20,7 @@ export interface HookEvent {
   hook_event_name: string;
   tool_name?: string;
   tool_input?: Record<string, unknown>;
-  tool_response?: string;
+  tool_response?: string | Record<string, unknown>;
   session_id?: string;
   turn_id?: string;
   // PostToolUse provides exit_code or error info
@@ -18,29 +30,46 @@ export interface HookEvent {
   stop_reason?: string;
   // SessionStart
   session_type?: string;
+  // Permission mode
+  permission_mode?: string;
 }
 
 /**
  * Process a hook event and trigger appropriate SFX.
  */
 export function handleHookEvent(event: HookEvent): void {
-  const { hook_event_name, tool_name } = event;
+  const { hook_event_name } = event;
+
+  // Ambient loop management:
+  // - UserPromptSubmit → thinking ambient (continuous while AI thinks)
+  // - PreToolUse → heartbeat ambient (alive indicator during tool execution)
+  //   Exception: Edit → typing ambient
+  // - PostToolUse / Stop → stop ambient
+  // - Next PreToolUse switches ambient automatically
 
   switch (hook_event_name) {
     case 'SessionStart':
+      _stopAmbient?.();
       playSfx('startup');
       break;
 
     case 'UserPromptSubmit':
+      _stopAmbient?.();
       playSfx('submit');
+      // Start thinking ambient — keeps playing until first tool use or stop
+      _startAmbient?.('thinking', 4000);
       break;
 
     case 'PreToolUse':
+      _stopAmbient?.();
       handlePreToolUse(event);
       break;
 
     case 'PostToolUse':
+      _stopAmbient?.();
       handlePostToolUse(event);
+      // After tool completes, start heartbeat — AI is still working (computing next step)
+      _startAmbient?.('heartbeat', 2500);
       break;
 
     case 'Notification':
@@ -48,18 +77,23 @@ export function handleHookEvent(event: HookEvent): void {
       break;
 
     case 'Stop':
+      _stopAmbient?.(); // AI finished — kill all ambient
       handleStop(event);
       break;
 
     case 'SubagentStart':
+      _stopAmbient?.();
       playSfx('agent-spawn');
+      _startAmbient?.('heartbeat', 2500);
       break;
 
     case 'SubagentStop':
+      _stopAmbient?.();
       playSfx('agent-done');
       break;
 
     case 'PreCompact':
+      _stopAmbient?.();
       playSfx('compact');
       break;
 
@@ -72,16 +106,25 @@ export function handleHookEvent(event: HookEvent): void {
 function handlePreToolUse(event: HookEvent): void {
   const { tool_name } = event;
 
-  if (tool_name === 'Write') {
+  if (tool_name === 'Edit') {
+    // Edit: typing ambient (keyboard sounds throughout edit)
+    _startAmbient?.('typing', 1200);
+  } else if (tool_name === 'Write') {
     playSfx('write');
-  } else if (tool_name === 'Edit') {
-    playSfx('typing');
+    _startAmbient?.('heartbeat', 2500);
   } else if (tool_name === 'Read') {
     playSfx('read');
+    _startAmbient?.('heartbeat', 2500);
   } else if (tool_name === 'Glob' || tool_name === 'Grep') {
     playSfx('search');
+    _startAmbient?.('heartbeat', 2500);
   } else if (tool_name === 'Bash') {
+    // Bash: notification (attention — may need approval) + heartbeat
+    playSfx('notification');
+    _startAmbient?.('heartbeat', 2500);
+  } else {
     playSfx('working');
+    _startAmbient?.('heartbeat', 2500);
   }
 }
 
@@ -121,7 +164,7 @@ function handleStop(event: HookEvent): void {
 function detectBashSfx(
   command: string,
   exitCode?: number,
-  _response?: string,
+  _response?: string | Record<string, unknown>,
 ): string | null {
   const cmd = command.trim().toLowerCase();
   const success = exitCode === undefined || exitCode === 0;
