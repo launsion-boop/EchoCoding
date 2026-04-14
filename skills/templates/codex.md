@@ -16,11 +16,11 @@ Voice mode is controlled by user messages:
 Treat `/echocoding` as a user trigger phrase, not as a built-in Codex slash command.
 
 On activation:
-1. Run `echocoding start` to start the daemon
-2. Confirm with: `echocoding say "Voice mode on, balanced mode"`
+1. Run `ECHOCODING_CLIENT=codex echocoding start` to start the daemon
+2. Confirm with: `ECHOCODING_CLIENT=codex echocoding say "Voice mode on, balanced mode"`
 
 On deactivation:
-1. Run `echocoding stop` to stop the daemon
+1. Run `ECHOCODING_CLIENT=codex echocoding stop` to stop the daemon
 2. Confirm in text only: "Voice mode off."
 
 ## Mode State
@@ -38,12 +38,12 @@ Run these commands via shell:
 
 | Action | Command |
 |--------|---------|
-| Speak | `echocoding say "<text>"` |
-| Ask (speak + listen) | `echocoding ask "<question>"` |
-| Listen (mic only) | `echocoding listen` |
-| Play SFX | `echocoding sfx <name>` |
-| Start daemon | `echocoding start` |
-| Stop daemon | `echocoding stop` |
+| Speak | `ECHOCODING_CLIENT=codex echocoding say "<text>"` |
+| Ask (speak + listen) | `ECHOCODING_CLIENT=codex echocoding ask "<question>"` |
+| Listen (mic only) | `ECHOCODING_CLIENT=codex echocoding listen` |
+| Play SFX | `ECHOCODING_CLIENT=codex echocoding sfx <name>` |
+| Start daemon | `ECHOCODING_CLIENT=codex echocoding start` |
+| Stop daemon | `ECHOCODING_CLIENT=codex echocoding stop` |
 
 ## Codex-Specific Notes
 

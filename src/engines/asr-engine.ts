@@ -25,7 +25,6 @@ let micAuthorized: boolean | null = null;
 
 function ensureMicAuthorized(): boolean {
   if (micAuthorized === true) return true;
-  if (micAuthorized === false) return false;  // Already checked and failed — don't retry
   const helper = getMicHelperPath();
   if (!helper) { micAuthorized = false; return false; }
 
@@ -35,10 +34,16 @@ function ensureMicAuthorized(): boolean {
     micAuthorized = true;
     return true;
   } catch {
-    // Not authorized — skip mic-helper, fall back to sox.
-    // Authorization should be triggered during `echocoding install`, not at recording time.
-    micAuthorized = false;
-    return false;
+    // Try to request permission if check failed.
+    try {
+      execFileSync(helper, ['authorize'], { stdio: 'ignore', timeout: 35_000 });
+      micAuthorized = true;
+      return true;
+    } catch {
+      // Keep it retryable in future listens in case user changes permission later.
+      micAuthorized = null;
+      return false;
+    }
   }
 }
 
@@ -62,6 +67,7 @@ function getSherpa(): typeof import('sherpa-onnx-node') | null {
 // Singleton ASR + VAD instances
 let recognizer: InstanceType<typeof import('sherpa-onnx-node').OfflineRecognizer> | null = null;
 let vad: InstanceType<typeof import('sherpa-onnx-node').Vad> | null = null;
+let lastRecordError: string | null = null;
 
 // --- Public API ---
 
@@ -109,6 +115,9 @@ async function listenLocal(timeoutSec: number): Promise<string> {
   // Step 1: Record audio from microphone
   const audioFile = await recordMicrophone(timeoutSec);
   if (!audioFile) {
+    if (lastRecordError) {
+      throw new Error(lastRecordError);
+    }
     return '[timeout]';
   }
 
@@ -128,17 +137,31 @@ async function listenLocal(timeoutSec: number): Promise<string> {
  */
 async function recordViaMicHelper(timeoutSec: number, outFile: string): Promise<string | null> {
   const helper = getMicHelperPath();
-  if (!helper || !ensureMicAuthorized()) return null;
+  if (!helper) return null;
+  if (!ensureMicAuthorized()) {
+    lastRecordError = 'Microphone permission denied. Please allow microphone access for your coding client, then retry.';
+    return null;
+  }
 
   return new Promise((resolve) => {
+    let stderr = '';
     const child = spawn(helper, ['record', String(timeoutSec), outFile], {
-      stdio: 'ignore',
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+
+    child.stderr?.setEncoding('utf-8');
+    child.stderr?.on('data', (chunk: string) => {
+      stderr += chunk;
     });
 
     child.on('close', (code) => {
       if (code === 0 && fs.existsSync(outFile) && fs.statSync(outFile).size > 44) {
         resolve(outFile);
       } else {
+        const lower = stderr.toLowerCase();
+        if (lower.includes('permission denied') || lower.includes('microphone permission denied')) {
+          lastRecordError = 'Microphone permission denied. Please allow microphone access for your coding client, then retry.';
+        }
         resolve(null);
       }
     });
@@ -166,6 +189,7 @@ async function recordViaMicHelper(timeoutSec: number, outFile: string): Promise<
  * Returns path to WAV file, or null if timeout with no audio.
  */
 async function recordMicrophone(timeoutSec: number): Promise<string | null> {
+  lastRecordError = null;
   fs.mkdirSync(TEMP_DIR, { recursive: true });
   const outFile = path.join(TEMP_DIR, `rec-${Date.now()}.wav`);
   const platform = os.platform();
@@ -174,7 +198,9 @@ async function recordMicrophone(timeoutSec: number): Promise<string | null> {
   if (platform === 'darwin') {
     const result = await recordViaMicHelper(timeoutSec, outFile);
     if (result) return result;
-    // Fall through to sox if mic-helper unavailable
+    // If user denied mic permission in helper, surface it directly.
+    if (lastRecordError) return null;
+    // Fall through to sox only when helper is unavailable/non-permission failure.
   }
 
   return new Promise((resolve) => {
@@ -322,11 +348,16 @@ async function listenCloud(timeoutSec: number): Promise<string> {
 
   const audioFile = await recordMicrophone(timeoutSec);
   if (!audioFile) {
+    if (lastRecordError) {
+      throw new Error(lastRecordError);
+    }
     return '[timeout]';
   }
 
+  let normalizedFile: string | null = null;
   try {
-    const audioData = fs.readFileSync(audioFile);
+    normalizedFile = normalizeWavForCloud(audioFile);
+    const audioData = fs.readFileSync(normalizedFile);
     const audioBase64 = audioData.toString('base64');
 
     // Detect if endpoint is Volcengine direct or our proxy
@@ -340,6 +371,9 @@ async function listenCloud(timeoutSec: number): Promise<string> {
       return await callProxyAsr(audioBase64, endpoint);
     }
   } finally {
+    if (normalizedFile && normalizedFile !== audioFile) {
+      try { fs.unlinkSync(normalizedFile); } catch { /* ignore */ }
+    }
     try { fs.unlinkSync(audioFile); } catch { /* ignore */ }
   }
 }
@@ -387,7 +421,8 @@ async function callVolcengineAsr(
   });
 
   if (!response.ok) {
-    throw new Error(`Volcengine ASR error: ${response.status}`);
+    const bodyText = await response.text().catch(() => '');
+    throw new Error(`Volcengine ASR error: ${response.status}${bodyText ? ` ${bodyText.slice(0, 200)}` : ''}`);
   }
 
   const result = await response.json() as {
@@ -413,7 +448,7 @@ async function callProxyAsr(audioBase64: string, endpoint: string): Promise<stri
     format: 'wav',
     language: 'zh-CN',
   });
-  const authHeaders = signRequest(bodyStr, 'POST', '/v1/asr');
+  const authHeaders = signRequest(bodyStr, 'POST', resolveEndpointPath(endpoint, '/v1/asr'));
 
   const response = await fetch(endpoint, {
     method: 'POST',
@@ -422,7 +457,15 @@ async function callProxyAsr(audioBase64: string, endpoint: string): Promise<stri
   });
 
   if (!response.ok) {
-    throw new Error(`Proxy ASR error: ${response.status}`);
+    const bodyText = await response.text().catch(() => '');
+    const lower = bodyText.toLowerCase();
+    if (
+      response.status === 500 &&
+      (lower.includes('websocket closed without result') || lower.includes('closed without result'))
+    ) {
+      return '[empty]';
+    }
+    throw new Error(`Proxy ASR error: ${response.status}${bodyText ? ` ${bodyText.slice(0, 200)}` : ''}`);
   }
 
   const result = await response.json() as { text?: string; error?: string };
@@ -439,4 +482,40 @@ async function callProxyAsr(audioBase64: string, endpoint: string): Promise<stri
 export function disposeAsr(): void {
   recognizer = null;
   vad = null;
+}
+
+function normalizeWavForCloud(inputFile: string): string {
+  const normalized = path.join(TEMP_DIR, `rec-normalized-${Date.now()}.wav`);
+  try {
+    execFileSync(
+      'sox',
+      [
+        inputFile,
+        '-t', 'wav',
+        '-e', 'signed-integer',
+        '-b', '16',
+        '-r', '16000',
+        '-c', '1',
+        normalized,
+      ],
+      { stdio: 'ignore', timeout: 8_000 },
+    );
+    if (fs.existsSync(normalized) && fs.statSync(normalized).size > 44) {
+      return normalized;
+    }
+  } catch {
+    // If conversion fails, keep original file.
+  }
+
+  try { fs.unlinkSync(normalized); } catch { /* ignore */ }
+  return inputFile;
+}
+
+function resolveEndpointPath(endpoint: string, fallback: string): string {
+  try {
+    const parsed = new URL(endpoint);
+    return parsed.pathname || fallback;
+  } catch {
+    return fallback;
+  }
 }

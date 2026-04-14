@@ -1,5 +1,5 @@
 import net from 'node:net';
-import { getConfig } from '../config.js';
+import { getConfig, resolveDaemonPaths } from '../config.js';
 
 interface DaemonMessage {
   type: 'hook' | 'say' | 'sfx' | 'ask' | 'listen' | 'ping';
@@ -16,7 +16,7 @@ interface DaemonMessage {
 export function sendToDaemon(msg: DaemonMessage): Promise<boolean> {
   return new Promise((resolve) => {
     const config = getConfig();
-    const { socketPath } = config.daemon;
+    const { socketPath } = resolveDaemonPaths(config.daemon);
     let settled = false;
 
     const done = (value: boolean) => {
@@ -67,7 +67,7 @@ export async function pingDaemon(): Promise<boolean> {
 export function sendWithResponse(msg: DaemonMessage, timeoutMs = 30_000): Promise<string> {
   return new Promise((resolve, reject) => {
     const config = getConfig();
-    const { socketPath } = config.daemon;
+    const { socketPath } = resolveDaemonPaths(config.daemon);
     let settled = false;
     let responseBuffer = '';
 

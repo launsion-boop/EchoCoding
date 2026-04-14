@@ -166,6 +166,7 @@ async function volcAsr(audioBase64, format, language) {
       },
     });
     let done = false;
+    let accumulatedText = '';  // collect best text across all server frames
 
     const finish = (err, text) => {
       if (done) return;
@@ -189,6 +190,26 @@ async function volcAsr(audioBase64, format, language) {
       const sizeBuf = Buffer.alloc(4);
       sizeBuf.writeUInt32BE(payload.length, 0);
       return Buffer.concat([header, sizeBuf, payload]);
+    }
+
+    // Parse JSON payload from a V3 binary frame.
+    // V3 frame layout (server→client):
+    //   [4B header] [4B payload_size BE] [payload]
+    // The header_size nibble (byte0 & 0x0f) tells how many 4-byte words the header is;
+    // we send header_size=1 (4B), but the server may use header_size=2 (8B header + 4B size).
+    // Try all plausible offsets in order.
+    function parseFrameJson(buf) {
+      const headerWords = buf[0] & 0x0f;          // typically 1 or 2
+      const baseOffset = headerWords * 4;          // 4 or 8
+      const payloadStart = baseOffset + 4;         // skip payload-size field
+      for (const offset of [payloadStart, baseOffset + 4, 8, 4]) {
+        if (buf.length <= offset) continue;
+        try {
+          const s = buf.slice(offset).toString('utf-8').trim();
+          if (s.startsWith('{')) return JSON.parse(s);
+        } catch { /* try next */ }
+      }
+      return null;
     }
 
     ws.on('open', () => {
@@ -217,23 +238,8 @@ async function volcAsr(audioBase64, format, language) {
 
         const msgType = (buf[1] >> 4) & 0x0f;
 
-        // Parse payload: skip 4-byte header, read 4-byte size, then payload
-        if (buf.length < 8) return;
-        // V3: [4B header] [4B reserved] [4B payload_size] [payload] or [4B header] [4B size] [payload]
-        // Try offset 8 first (with reserved), then offset 4 (without)
-        let jsonStr;
-        for (const offset of [12, 8, 4]) {
-          if (buf.length <= offset) continue;
-          try {
-            const slice = buf.slice(offset);
-            jsonStr = slice.toString('utf-8').trim();
-            if (jsonStr.startsWith('{')) { JSON.parse(jsonStr); break; }
-            jsonStr = null;
-          } catch { jsonStr = null; }
-        }
-
-        if (!jsonStr) return;
-        const result = JSON.parse(jsonStr);
+        const result = parseFrameJson(buf);
+        if (!result) return;
 
         // V3 error response (msg_type=0xf)
         if (msgType === 0xf) {
@@ -242,16 +248,17 @@ async function volcAsr(audioBase64, format, language) {
           return;
         }
 
-        // V3 ASR result (msg_type=0x9)
-        // Byte 1: 0x91 = intermediate, 0x93 = final (flags bit 1 = final)
-        const isFinal = (buf[1] & 0x02) !== 0;
-        const text = result.result?.text || '';
+        // Collect text from any server result frame (intermediate or final)
+        const text = result.result?.text || result.text || '';
+        if (text) accumulatedText = text;  // keep updating — last non-empty wins
 
-        if (isFinal && text) {
+        // For non-streaming bigmodel: resolve immediately on final frame flag
+        // (bit 1 of the flags nibble in byte 1)
+        const isFinal = (buf[1] & 0x02) !== 0;
+        if (isFinal) {
           clearTimeout(timeout);
-          finish(null, text.trim());
+          finish(null, accumulatedText.trim());
         }
-        // Intermediate results: keep waiting for final
       } catch (e) {
         console.error('[ASR] Parse error:', e.message);
       }
@@ -263,8 +270,10 @@ async function volcAsr(audioBase64, format, language) {
     });
 
     ws.on('close', () => {
+      // Non-streaming bigmodel closes after sending result.
+      // Resolve with whatever text we collected (empty string = silence/no speech).
       clearTimeout(timeout);
-      if (!done) finish(new Error('ASR WebSocket closed without result'));
+      if (!done) finish(null, accumulatedText.trim());
     });
   });
 }

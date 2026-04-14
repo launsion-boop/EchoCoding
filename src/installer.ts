@@ -269,12 +269,12 @@ function shellQuote(value: string): string {
 
 function getCodexVoiceReminderCommand(): string {
   const script = path.join(getPackageRoot(), 'scripts', 'voice-reminder.sh');
-  return `ECHOCODING_HOOK_CLIENT=codex bash ${shellQuote(script)}`;
+  return `ECHOCODING_HOOK_CLIENT=codex ECHOCODING_CLIENT=codex bash ${shellQuote(script)}`;
 }
 
 function getCodexAutoStartCommand(): string {
   const script = path.join(getPackageRoot(), 'scripts', 'auto-start.sh');
-  return `ECHOCODING_NODE=${shellQuote(process.execPath)} bash ${shellQuote(script)}`;
+  return `ECHOCODING_CLIENT=codex ECHOCODING_NODE=${shellQuote(process.execPath)} bash ${shellQuote(script)}`;
 }
 
 export function installCodex(): { success: boolean; message: string } {

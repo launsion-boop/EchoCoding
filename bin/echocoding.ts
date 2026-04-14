@@ -5,7 +5,7 @@ import { isDaemonRunning, stopDaemon } from '../src/daemon/server.js';
 import { sendSay, sendSfx, sendAsk, sendListen, sendWithResponse, pingDaemon } from '../src/daemon/client.js';
 import { installClaudeCode, uninstallClaudeCode, installCodex, uninstallCodex, detectInstalledAgents } from '../src/installer.js';
 import { detectInstalledClients, getAllAdapters } from '../src/adapters/registry.js';
-import { getConfig, setConfigValue, getConfigValue, ensureConfigDir, saveConfig } from '../src/config.js';
+import { getConfig, setConfigValue, getConfigValue, ensureConfigDir, saveConfig, getRuntimeClientId } from '../src/config.js';
 import { playSfx } from '../src/engines/sfx-engine.js';
 import { checkModels, downloadModels, hasEssentialModels } from '../src/downloader.js';
 import { checkSystemDeps, installMissingDeps } from '../src/deps.js';
@@ -229,6 +229,7 @@ program
   .command('status')
   .description('Show daemon status')
   .action(async () => {
+    console.log(`[echocoding] Client context: ${getRuntimeClientId()}`);
     const status = isDaemonRunning();
     if (status.running) {
       const reachable = await pingDaemon();
