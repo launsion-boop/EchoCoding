@@ -109,9 +109,11 @@ test('gemini adapter reports integrated only after MCP config exists', async () 
   assert.equal(geminiAdapter.detect().integrated, true);
 });
 
-test('codex adapter reports integrated only after skill and managed instructions exist', async () => {
+test('codex adapter reports integrated only after skill, instructions, hooks, and feature flag exist', async () => {
   const homeDir = makeTempHome();
   const codexDir = path.join(homeDir, '.codex');
+  const configPath = path.join(codexDir, 'config.toml');
+  const hooksPath = path.join(codexDir, 'hooks.json');
   const skillPath = path.join(codexDir, 'skills', 'echocoding', 'SKILL.md');
   const instructionsPath = path.join(codexDir, 'instructions.md');
 
@@ -131,6 +133,30 @@ test('codex adapter reports integrated only after skill and managed instructions
       '<!-- echocoding-voice-mode:end -->',
       '',
     ].join('\n'),
+    'utf-8',
+  );
+  fs.writeFileSync(configPath, 'features.codex_hooks = true\n', 'utf-8');
+  fs.writeFileSync(
+    hooksPath,
+    JSON.stringify(
+      {
+        hooks: {
+          SessionStart: [
+            {
+              matcher: 'startup|resume',
+              hooks: [{ type: 'command', command: 'bash /tmp/auto-start.sh' }],
+            },
+          ],
+          UserPromptSubmit: [
+            {
+              hooks: [{ type: 'command', command: 'bash /tmp/voice-reminder.sh' }],
+            },
+          ],
+        },
+      },
+      null,
+      2,
+    ),
     'utf-8',
   );
 

@@ -20,6 +20,23 @@ interface ClaudeSettings {
   [key: string]: unknown;
 }
 
+interface CodexHookEntry {
+  type: 'command';
+  command: string;
+  statusMessage?: string;
+  timeout?: number;
+}
+
+interface CodexHookMatcher {
+  matcher?: string;
+  hooks: CodexHookEntry[];
+}
+
+interface CodexHooksFile {
+  hooks?: Record<string, CodexHookMatcher[]>;
+  [key: string]: unknown;
+}
+
 const CLAUDE_SETTINGS_PATH = path.join(os.homedir(), '.claude', 'settings.json');
 
 function getHookCommand(): string {
@@ -229,7 +246,9 @@ export function detectInstalledAgents(): string[] {
 // --- Codex CLI integration ---
 
 const CODEX_DIR = path.join(os.homedir(), '.codex');
+const CODEX_CONFIG_PATH = path.join(CODEX_DIR, 'config.toml');
 const CODEX_INSTRUCTIONS_PATH = path.join(CODEX_DIR, 'instructions.md');
+const CODEX_HOOKS_PATH = path.join(CODEX_DIR, 'hooks.json');
 const CODEX_SKILLS_DIR = path.join(CODEX_DIR, 'skills');
 const CODEX_SKILL_DIR = path.join(CODEX_SKILLS_DIR, 'echocoding');
 const CODEX_SKILL_PATH = path.join(CODEX_SKILL_DIR, 'SKILL.md');
@@ -237,10 +256,26 @@ const CODEX_LEGACY_SKILL_PATH = path.join(CODEX_SKILLS_DIR, 'echocoding.md');
 const CODEX_MANAGED_BLOCK_START = '<!-- echocoding-voice-mode:start -->';
 const CODEX_MANAGED_BLOCK_END = '<!-- echocoding-voice-mode:end -->';
 const CODEX_LEGACY_MARKER = '<!-- echocoding-voice-mode -->';
+const CODEX_HOOKS_FEATURE_START = '# echocoding-codex-hooks:start';
+const CODEX_HOOKS_FEATURE_END = '# echocoding-codex-hooks:end';
 const CODEX_LEGACY_BLOCK = [
   '## EchoCoding Voice Mode',
   'When user says "/echocoding" or "voice mode on", run `echocoding start` and follow the voice mode rules in the echocoding skill.',
 ].join('\n');
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function getCodexVoiceReminderCommand(): string {
+  const script = path.join(getPackageRoot(), 'scripts', 'voice-reminder.sh');
+  return `ECHOCODING_HOOK_CLIENT=codex bash ${shellQuote(script)}`;
+}
+
+function getCodexAutoStartCommand(): string {
+  const script = path.join(getPackageRoot(), 'scripts', 'auto-start.sh');
+  return `ECHOCODING_NODE=${shellQuote(process.execPath)} bash ${shellQuote(script)}`;
+}
 
 export function installCodex(): { success: boolean; message: string } {
   if (!fs.existsSync(CODEX_DIR)) {
@@ -266,7 +301,18 @@ export function installCodex(): { success: boolean; message: string } {
     const nextInstructions = upsertCodexInstructions(instructions);
     writeTextFileAtomic(CODEX_INSTRUCTIONS_PATH, nextInstructions);
 
-    return { success: true, message: 'Installed EchoCoding skill for Codex CLI' };
+    let config = '';
+    if (fs.existsSync(CODEX_CONFIG_PATH)) {
+      config = fs.readFileSync(CODEX_CONFIG_PATH, 'utf-8');
+    }
+    const nextConfig = upsertCodexHooksFeature(config);
+    writeTextFileAtomic(CODEX_CONFIG_PATH, nextConfig);
+
+    const hooks = readCodexHooksFile();
+    const nextHooks = upsertCodexHooks(hooks);
+    writeJsonFileAtomic(CODEX_HOOKS_PATH, nextHooks);
+
+    return { success: true, message: 'Installed EchoCoding skill and hooks for Codex CLI' };
   } catch (err) {
     return {
       success: false,
@@ -298,6 +344,24 @@ export function uninstallCodex(): { success: boolean; message: string } {
       writeTextFileAtomic(CODEX_INSTRUCTIONS_PATH, removeCodexInstructions(instructions));
     }
 
+    if (fs.existsSync(CODEX_CONFIG_PATH)) {
+      const config = fs.readFileSync(CODEX_CONFIG_PATH, 'utf-8');
+      writeTextFileAtomic(CODEX_CONFIG_PATH, removeCodexHooksFeature(config));
+    }
+
+    if (fs.existsSync(CODEX_HOOKS_PATH)) {
+      const hooks = removeCodexHooks(readCodexHooksFile());
+      if (isCodexHooksFileEmpty(hooks)) {
+        try {
+          fs.unlinkSync(CODEX_HOOKS_PATH);
+        } catch {
+          /* ignore */
+        }
+      } else {
+        writeJsonFileAtomic(CODEX_HOOKS_PATH, hooks);
+      }
+    }
+
     return { success: true, message: 'Removed EchoCoding from Codex CLI' };
   } catch (err) {
     return {
@@ -327,6 +391,209 @@ function upsertCodexInstructions(instructions: string): string {
 function removeCodexInstructions(instructions: string): string {
   const cleaned = stripCodexManagedText(instructions);
   return cleaned ? cleaned + '\n' : '';
+}
+
+export function hasCodexHooksFeatureEnabled(config: string): boolean {
+  const text = config.replace(/\r\n/g, '\n');
+
+  if (/^\s*features\.codex_hooks\s*=\s*true\s*(?:#.*)?$/m.test(text)) {
+    return true;
+  }
+
+  const lines = text.split('\n');
+  let inFeatures = false;
+  for (const line of lines) {
+    const tableMatch = line.match(/^\s*\[([^\]]+)\]\s*$/);
+    if (tableMatch) {
+      inFeatures = tableMatch[1].trim() === 'features';
+      continue;
+    }
+    if (inFeatures && /^\s*codex_hooks\s*=\s*true\s*(?:#.*)?$/m.test(line)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function upsertCodexHooksFeature(config: string): string {
+  let next = stripCodexHooksFeatureBlock(config);
+
+  if (/^\s*features\.codex_hooks\s*=\s*(?:true|false)\s*(?:#.*)?$/m.test(next)) {
+    next = next.replace(
+      /^\s*features\.codex_hooks\s*=\s*(?:true|false)\s*(?:#.*)?$/m,
+      'features.codex_hooks = true',
+    );
+    return tidyText(next) + '\n';
+  }
+
+  const lines = next.split('\n');
+  let inFeatures = false;
+  for (let i = 0; i < lines.length; i++) {
+    const tableMatch = lines[i].match(/^\s*\[([^\]]+)\]\s*$/);
+    if (tableMatch) {
+      inFeatures = tableMatch[1].trim() === 'features';
+      continue;
+    }
+    if (inFeatures && /^\s*codex_hooks\s*=\s*(?:true|false)\s*(?:#.*)?$/.test(lines[i])) {
+      lines[i] = 'codex_hooks = true';
+      return tidyText(lines.join('\n')) + '\n';
+    }
+  }
+
+  const managedBlock = [
+    CODEX_HOOKS_FEATURE_START,
+    'codex_hooks = true',
+    CODEX_HOOKS_FEATURE_END,
+  ];
+
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*\[features\]\s*$/.test(lines[i])) {
+      lines.splice(i + 1, 0, ...managedBlock);
+      return tidyText(lines.join('\n')) + '\n';
+    }
+  }
+
+  const cleaned = tidyText(next);
+  const suffix = cleaned ? '\n\n' : '';
+  return cleaned + suffix + [
+    CODEX_HOOKS_FEATURE_START,
+    'features.codex_hooks = true',
+    CODEX_HOOKS_FEATURE_END,
+  ].join('\n') + '\n';
+}
+
+function removeCodexHooksFeature(config: string): string {
+  const cleaned = tidyText(stripCodexHooksFeatureBlock(config));
+  return cleaned ? cleaned + '\n' : '';
+}
+
+function stripCodexHooksFeatureBlock(config: string): string {
+  return removeDelimitedBlock(
+    config.replace(/\r\n/g, '\n'),
+    CODEX_HOOKS_FEATURE_START,
+    CODEX_HOOKS_FEATURE_END,
+  );
+}
+
+function readCodexHooksFile(): CodexHooksFile {
+  if (!fs.existsSync(CODEX_HOOKS_PATH)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(CODEX_HOOKS_PATH, 'utf-8')) as CodexHooksFile;
+  } catch {
+    throw new Error(`Failed to parse existing Codex hooks file: ${CODEX_HOOKS_PATH}`);
+  }
+}
+
+function upsertCodexHooks(config: CodexHooksFile): CodexHooksFile {
+  const next: CodexHooksFile = { ...config, hooks: { ...(config.hooks ?? {}) } };
+
+  upsertCodexHookGroup(next.hooks!, 'SessionStart', 'auto-start', {
+    matcher: 'startup|resume',
+    hooks: [
+      {
+        type: 'command',
+        command: getCodexAutoStartCommand(),
+        statusMessage: 'Starting EchoCoding daemon',
+      },
+    ],
+  });
+
+  upsertCodexHookGroup(next.hooks!, 'UserPromptSubmit', 'voice-reminder', {
+    hooks: [
+      {
+        type: 'command',
+        command: getCodexVoiceReminderCommand(),
+      },
+    ],
+  });
+
+  return next;
+}
+
+function removeCodexHooks(config: CodexHooksFile): CodexHooksFile {
+  if (!config.hooks) return config;
+
+  const nextHooks: Record<string, CodexHookMatcher[]> = {};
+
+  for (const [eventName, groups] of Object.entries(config.hooks)) {
+    const filteredGroups = groups
+      .map((group) => ({
+        ...group,
+        hooks: group.hooks.filter(
+          (hook) =>
+            !hook.command.includes('voice-reminder') &&
+            !hook.command.includes('auto-start'),
+        ),
+      }))
+      .filter((group) => group.hooks.length > 0);
+
+    if (filteredGroups.length > 0) {
+      nextHooks[eventName] = filteredGroups;
+    }
+  }
+
+  const next: CodexHooksFile = { ...config };
+  if (Object.keys(nextHooks).length > 0) {
+    next.hooks = nextHooks;
+  } else {
+    delete next.hooks;
+  }
+  return next;
+}
+
+function upsertCodexHookGroup(
+  hooks: Record<string, CodexHookMatcher[]>,
+  eventName: string,
+  commandNeedle: string,
+  desiredGroup: CodexHookMatcher,
+): void {
+  const groups = hooks[eventName] ?? [];
+  const normalized: CodexHookMatcher[] = [];
+  let inserted = false;
+
+  for (const group of groups) {
+    const retainedHooks = group.hooks.filter((hook) => !hook.command.includes(commandNeedle));
+
+    if (retainedHooks.length !== group.hooks.length) {
+      if (!inserted) {
+        normalized.push({
+          ...desiredGroup,
+          hooks: desiredGroup.hooks.map((hook) => ({ ...hook })),
+        });
+        inserted = true;
+      }
+
+      if (retainedHooks.length > 0) {
+        normalized.push({
+          ...group,
+          hooks: retainedHooks,
+        });
+      }
+      continue;
+    }
+
+    normalized.push(group);
+  }
+
+  if (!inserted) {
+    normalized.push({
+      ...desiredGroup,
+      hooks: desiredGroup.hooks.map((hook) => ({ ...hook })),
+    });
+  }
+
+  hooks[eventName] = normalized;
+}
+
+function isCodexHooksFileEmpty(config: CodexHooksFile): boolean {
+  const otherKeys = Object.keys(config).filter((key) => key !== 'hooks');
+
+  if (!config.hooks) {
+    return otherKeys.length === 0;
+  }
+
+  return Object.keys(config.hooks).length === 0 && otherKeys.length === 0;
 }
 
 function stripCodexManagedText(instructions: string): string {
@@ -362,6 +629,10 @@ function removeLegacyCodexBlock(text: string): string {
 }
 
 function tidyMarkdownText(text: string): string {
+  return tidyText(text);
+}
+
+function tidyText(text: string): string {
   return text
     .replace(/\n{3,}/g, '\n\n')
     .trim();
@@ -373,6 +644,10 @@ function writeTextFileAtomic(filePath: string, content: string): void {
   const tmpPath = filePath + '.tmp';
   fs.writeFileSync(tmpPath, content, 'utf-8');
   fs.renameSync(tmpPath, filePath);
+}
+
+function writeJsonFileAtomic(filePath: string, content: unknown): void {
+  writeTextFileAtomic(filePath, JSON.stringify(content, null, 2) + '\n');
 }
 
 function escapeRegex(value: string): string {

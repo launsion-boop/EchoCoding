@@ -2,9 +2,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import type { ClientAdapter, AdapterDetection, AdapterResult } from './types.js';
-import { installCodex, uninstallCodex } from '../installer.js';
+import { installCodex, uninstallCodex, hasCodexHooksFeatureEnabled } from '../installer.js';
 
 const CODEX_DIR = path.join(os.homedir(), '.codex');
+const CODEX_CONFIG_PATH = path.join(CODEX_DIR, 'config.toml');
+const CODEX_HOOKS_PATH = path.join(CODEX_DIR, 'hooks.json');
 const CODEX_SKILLS_DIR = path.join(CODEX_DIR, 'skills');
 const CODEX_INSTRUCTIONS_PATH = path.join(CODEX_DIR, 'instructions.md');
 const SKILL_PATH = path.join(CODEX_SKILLS_DIR, 'echocoding', 'SKILL.md');
@@ -23,17 +25,52 @@ function hasManagedInstructions(): boolean {
   }
 }
 
+function hasHooksFeatureEnabled(): boolean {
+  if (!fs.existsSync(CODEX_CONFIG_PATH)) return false;
+  try {
+    return hasCodexHooksFeatureEnabled(fs.readFileSync(CODEX_CONFIG_PATH, 'utf-8'));
+  } catch {
+    return false;
+  }
+}
+
+function hasManagedHooks(): boolean {
+  if (!fs.existsSync(CODEX_HOOKS_PATH)) return false;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(CODEX_HOOKS_PATH, 'utf-8')) as {
+      hooks?: Record<string, Array<{ hooks?: Array<{ command?: string }> }>>;
+    };
+    const sessionStart = parsed.hooks?.SessionStart ?? [];
+    const userPromptSubmit = parsed.hooks?.UserPromptSubmit ?? [];
+
+    const hasAutoStart = sessionStart.some((group) =>
+      (group.hooks ?? []).some((hook) => hook.command?.includes('auto-start')),
+    );
+    const hasReminder = userPromptSubmit.some((group) =>
+      (group.hooks ?? []).some((hook) => hook.command?.includes('voice-reminder')),
+    );
+
+    return hasAutoStart && hasReminder;
+  } catch {
+    return false;
+  }
+}
+
 export const codexAdapter: ClientAdapter = {
   id: 'codex',
   name: 'Codex CLI',
-  mechanism: 'prompt-only',
+  mechanism: 'hook',
 
   detect(): AdapterDetection {
     const installed = fs.existsSync(CODEX_DIR);
     const detection: AdapterDetection = { installed };
     if (installed) {
       detection.configPath = CODEX_INSTRUCTIONS_PATH;
-      detection.integrated = hasCodexSkill() && hasManagedInstructions();
+      detection.integrated =
+        hasCodexSkill() &&
+        hasManagedInstructions() &&
+        hasHooksFeatureEnabled() &&
+        hasManagedHooks();
     }
     return detection;
   },

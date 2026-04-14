@@ -23,9 +23,12 @@ test('installCodex writes a Codex skill directory and migrates legacy instructio
   const homeDir = makeTempHome();
   const codexDir = path.join(homeDir, '.codex');
   const skillsDir = path.join(codexDir, 'skills');
+  const configPath = path.join(codexDir, 'config.toml');
+  const hooksPath = path.join(codexDir, 'hooks.json');
   const instructionsPath = path.join(codexDir, 'instructions.md');
 
   fs.mkdirSync(skillsDir, { recursive: true });
+  fs.writeFileSync(configPath, 'model = "gpt-5.4"\n', 'utf-8');
   fs.writeFileSync(path.join(skillsDir, 'echocoding.md'), '# legacy flat skill\n', 'utf-8');
   fs.writeFileSync(
     instructionsPath,
@@ -66,15 +69,70 @@ test('installCodex writes a Codex skill directory and migrates legacy instructio
   assert.match(instructions, /<!-- echocoding-voice-mode:start -->/);
   assert.match(instructions, /<!-- echocoding-voice-mode:end -->/);
   assert.doesNotMatch(instructions, /<!-- echocoding-voice-mode -->/);
+
+  const config = fs.readFileSync(configPath, 'utf-8');
+  assert.match(config, /model = "gpt-5\.4"/);
+  assert.match(config, /features\.codex_hooks = true/);
+
+  const hooks = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
+  assert.equal(Array.isArray(hooks.hooks?.SessionStart), true);
+  assert.equal(Array.isArray(hooks.hooks?.UserPromptSubmit), true);
+  assert.match(
+    hooks.hooks.SessionStart[0].hooks[0].command,
+    /auto-start\.sh/,
+  );
+  assert.equal(
+    hooks.hooks.SessionStart[0].hooks[0].statusMessage,
+    'Starting EchoCoding daemon',
+  );
+  assert.match(
+    hooks.hooks.UserPromptSubmit[0].hooks[0].command,
+    /ECHOCODING_HOOK_CLIENT=codex .*voice-reminder\.sh/,
+  );
 });
 
-test('installCodex is idempotent and uninstallCodex removes managed artifacts', async () => {
+test('installCodex is idempotent and uninstallCodex removes managed artifacts while preserving unrelated hooks', async () => {
   const homeDir = makeTempHome();
   const codexDir = path.join(homeDir, '.codex');
+  const configPath = path.join(codexDir, 'config.toml');
+  const hooksPath = path.join(codexDir, 'hooks.json');
   const instructionsPath = path.join(codexDir, 'instructions.md');
 
   fs.mkdirSync(codexDir, { recursive: true });
   fs.writeFileSync(instructionsPath, '# Existing Instructions\n', 'utf-8');
+  fs.writeFileSync(
+    configPath,
+    [
+      'model = "gpt-5.4"',
+      '',
+      '[features]',
+      'fast_mode = true',
+      '',
+    ].join('\n'),
+    'utf-8',
+  );
+  fs.writeFileSync(
+    hooksPath,
+    JSON.stringify(
+      {
+        hooks: {
+          Stop: [
+            {
+              hooks: [
+                {
+                  type: 'command',
+                  command: '/usr/bin/env true',
+                },
+              ],
+            },
+          ],
+        },
+      },
+      null,
+      2,
+    ) + '\n',
+    'utf-8',
+  );
 
   const { installCodex, uninstallCodex } = await loadInstaller(homeDir);
 
@@ -84,13 +142,31 @@ test('installCodex is idempotent and uninstallCodex removes managed artifacts', 
   const instructionsAfterInstall = fs.readFileSync(instructionsPath, 'utf-8');
   assert.equal((instructionsAfterInstall.match(/## EchoCoding Voice Mode/g) ?? []).length, 1);
 
+  const configAfterInstall = fs.readFileSync(configPath, 'utf-8');
+  assert.equal((configAfterInstall.match(/codex_hooks = true/g) ?? []).length, 1);
+  assert.match(configAfterInstall, /\[features\][\s\S]*fast_mode = true/);
+
+  const hooksAfterInstall = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
+  assert.equal(hooksAfterInstall.hooks.Stop.length, 1);
+  assert.equal(hooksAfterInstall.hooks.SessionStart.length, 1);
+  assert.equal(hooksAfterInstall.hooks.UserPromptSubmit.length, 1);
+
   const uninstallResult = uninstallCodex();
   assert.equal(uninstallResult.success, true);
 
   const instructionsAfterUninstall = fs.readFileSync(instructionsPath, 'utf-8');
   assert.doesNotMatch(instructionsAfterUninstall, /EchoCoding Voice Mode/);
+  const configAfterUninstall = fs.readFileSync(configPath, 'utf-8');
+  assert.doesNotMatch(configAfterUninstall, /echocoding-codex-hooks/);
+  assert.doesNotMatch(configAfterUninstall, /codex_hooks = true/);
+  assert.match(configAfterUninstall, /fast_mode = true/);
   assert.equal(
     fs.existsSync(path.join(codexDir, 'skills', 'echocoding', 'SKILL.md')),
     false,
   );
+
+  const hooksAfterUninstall = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
+  assert.equal(hooksAfterUninstall.hooks.Stop.length, 1);
+  assert.equal(hooksAfterUninstall.hooks.SessionStart, undefined);
+  assert.equal(hooksAfterUninstall.hooks.UserPromptSubmit, undefined);
 });
