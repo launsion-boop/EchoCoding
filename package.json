@@ -35,7 +35,9 @@
     "skills/",
     "src/studio/index.html",
     "tools/mic-helper.swift",
-    "scripts/build-mic-helper.sh"
+    "scripts/build-mic-helper.sh",
+    "scripts/voice-reminder.sh",
+    "scripts/auto-start.sh"
   ],
   "repository": {
     "type": "git",

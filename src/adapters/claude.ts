@@ -71,6 +71,18 @@ function getHookCommand(): string {
   return `${nodePath} ${hookScript}`;
 }
 
+function getVoiceReminderCommand(): string {
+  const script = path.join(getPackageRoot(), 'scripts', 'voice-reminder.sh');
+  return `bash ${script}`;
+}
+
+function getAutoStartCommand(): string {
+  const script = path.join(getPackageRoot(), 'scripts', 'auto-start.sh');
+  const nodePath = process.execPath;
+  // Pass Node path as env so auto-start.sh doesn't need to hunt for it
+  return `ECHOCODING_NODE=${nodePath} bash ${script}`;
+}
+
 // --- Claude Code adapter ---
 
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
@@ -88,13 +100,14 @@ export const claudeAdapter: ClientAdapter = {
     if (installed) {
       detection.configPath = CLAUDE_SETTINGS_PATH;
       detection.integrated = false;
+      // Check if EchoCoding hooks are actually injected in settings.json
       try {
         if (fs.existsSync(CLAUDE_SETTINGS_PATH)) {
           const raw = fs.readFileSync(CLAUDE_SETTINGS_PATH, 'utf-8');
           detection.integrated = raw.includes('echocoding-hook');
         }
       } catch {
-        // Can't read settings - treat as not integrated
+        // Can't read settings — treat as not integrated
       }
     }
     return detection;
@@ -149,6 +162,52 @@ export const claudeAdapter: ClientAdapter = {
       }
     }
 
+    // Inject voice-reminder blocking hook for UserPromptSubmit
+    // This reminds the agent to call `echocoding say` in balanced/verbose modes
+    {
+      const existing = settings.hooks['UserPromptSubmit'] ?? [];
+      const hasReminder = existing.some((matcher) =>
+        matcher.hooks.some((h) => h.command.includes('voice-reminder')),
+      );
+      if (!hasReminder) {
+        existing.push({
+          matcher: '',
+          hooks: [
+            {
+              type: 'command',
+              command: getVoiceReminderCommand(),
+              // blocking (no async) — stdout is injected as system message
+            },
+          ],
+        });
+        settings.hooks['UserPromptSubmit'] = existing;
+        injected++;
+      }
+    }
+
+    // Inject auto-start hook for SessionStart
+    // Starts daemon automatically when Claude Code opens a new session
+    {
+      const existing = settings.hooks['SessionStart'] ?? [];
+      const hasAutoStart = existing.some((matcher) =>
+        matcher.hooks.some((h) => h.command.includes('auto-start')),
+      );
+      if (!hasAutoStart) {
+        existing.push({
+          matcher: '',
+          hooks: [
+            {
+              type: 'command',
+              command: getAutoStartCommand(),
+              async: true, // non-blocking — daemon starts in background
+            },
+          ],
+        });
+        settings.hooks['SessionStart'] = existing;
+        injected++;
+      }
+    }
+
     // Backup + atomic write
     writeSettingsSafe(CLAUDE_SETTINGS_PATH, settings);
 
@@ -190,7 +249,12 @@ export const claudeAdapter: ClientAdapter = {
       const filtered = matchers
         .map((matcher) => ({
           ...matcher,
-          hooks: matcher.hooks.filter((h) => !h.command.includes('echocoding-hook')),
+          hooks: matcher.hooks.filter(
+            (h) =>
+              !h.command.includes('echocoding-hook') &&
+              !h.command.includes('voice-reminder') &&
+              !h.command.includes('auto-start'),
+          ),
         }))
         .filter((matcher) => matcher.hooks.length > 0);
 
