@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { compilePrompt } from './prompt-compiler.js';
 
 interface ClaudeHookEntry {
   type: string;
@@ -227,58 +228,153 @@ export function detectInstalledAgents(): string[] {
 
 // --- Codex CLI integration ---
 
-const CODEX_INSTRUCTIONS_PATH = path.join(os.homedir(), '.codex', 'instructions.md');
-const CODEX_SKILLS_DIR = path.join(os.homedir(), '.codex', 'skills');
+const CODEX_DIR = path.join(os.homedir(), '.codex');
+const CODEX_INSTRUCTIONS_PATH = path.join(CODEX_DIR, 'instructions.md');
+const CODEX_SKILLS_DIR = path.join(CODEX_DIR, 'skills');
+const CODEX_SKILL_DIR = path.join(CODEX_SKILLS_DIR, 'echocoding');
+const CODEX_SKILL_PATH = path.join(CODEX_SKILL_DIR, 'SKILL.md');
+const CODEX_LEGACY_SKILL_PATH = path.join(CODEX_SKILLS_DIR, 'echocoding.md');
+const CODEX_MANAGED_BLOCK_START = '<!-- echocoding-voice-mode:start -->';
+const CODEX_MANAGED_BLOCK_END = '<!-- echocoding-voice-mode:end -->';
+const CODEX_LEGACY_MARKER = '<!-- echocoding-voice-mode -->';
+const CODEX_LEGACY_BLOCK = [
+  '## EchoCoding Voice Mode',
+  'When user says "/echocoding" or "voice mode on", run `echocoding start` and follow the voice mode rules in the echocoding skill.',
+].join('\n');
 
 export function installCodex(): { success: boolean; message: string } {
-  const codexDir = path.join(os.homedir(), '.codex');
-  if (!fs.existsSync(codexDir)) {
+  if (!fs.existsSync(CODEX_DIR)) {
     return { success: false, message: 'Codex CLI config directory not found' };
   }
 
-  // Install skill to Codex skills directory
-  fs.mkdirSync(CODEX_SKILLS_DIR, { recursive: true });
-  const skillSrc = path.join(getPackageRoot(), 'skills', 'echocoding.md');
-  const skillDst = path.join(CODEX_SKILLS_DIR, 'echocoding.md');
+  try {
+    const compiledSkill = compilePrompt('codex').trimEnd() + '\n';
+    fs.mkdirSync(CODEX_SKILL_DIR, { recursive: true });
+    writeTextFileAtomic(CODEX_SKILL_PATH, compiledSkill);
 
-  if (fs.existsSync(skillSrc)) {
-    fs.copyFileSync(skillSrc, skillDst);
+    // Remove legacy flat skill if present.
+    try {
+      if (fs.existsSync(CODEX_LEGACY_SKILL_PATH)) fs.unlinkSync(CODEX_LEGACY_SKILL_PATH);
+    } catch {
+      /* ignore */
+    }
+
+    let instructions = '';
+    if (fs.existsSync(CODEX_INSTRUCTIONS_PATH)) {
+      instructions = fs.readFileSync(CODEX_INSTRUCTIONS_PATH, 'utf-8');
+    }
+    const nextInstructions = upsertCodexInstructions(instructions);
+    writeTextFileAtomic(CODEX_INSTRUCTIONS_PATH, nextInstructions);
+
+    return { success: true, message: 'Installed EchoCoding skill for Codex CLI' };
+  } catch (err) {
+    return {
+      success: false,
+      message: `Failed to install Codex integration: ${err instanceof Error ? err.message : String(err)}`,
+    };
   }
-
-  // Append EchoCoding reference to instructions.md if not already there
-  const marker = '<!-- echocoding-voice-mode -->';
-  let instructions = '';
-  if (fs.existsSync(CODEX_INSTRUCTIONS_PATH)) {
-    instructions = fs.readFileSync(CODEX_INSTRUCTIONS_PATH, 'utf-8');
-  }
-
-  if (!instructions.includes(marker)) {
-    const appendix = `\n\n${marker}\n## EchoCoding Voice Mode\nWhen user says "/echocoding" or "voice mode on", run \`echocoding start\` and follow the voice mode rules in the echocoding skill.\n`;
-    fs.appendFileSync(CODEX_INSTRUCTIONS_PATH, appendix);
-  }
-
-  return { success: true, message: 'Installed EchoCoding skill for Codex CLI' };
 }
 
 export function uninstallCodex(): { success: boolean; message: string } {
-  // Remove skill file
-  const skillPath = path.join(CODEX_SKILLS_DIR, 'echocoding.md');
-  try { fs.unlinkSync(skillPath); } catch { /* ignore */ }
-
-  // Remove marker from instructions.md
-  if (fs.existsSync(CODEX_INSTRUCTIONS_PATH)) {
-    let instructions = fs.readFileSync(CODEX_INSTRUCTIONS_PATH, 'utf-8');
-    const marker = '<!-- echocoding-voice-mode -->';
-    const markerIdx = instructions.indexOf(marker);
-    if (markerIdx !== -1) {
-      // Remove from marker to end of the section (next ## or end of file)
-      const after = instructions.slice(markerIdx);
-      const nextSection = after.indexOf('\n## ', 1);
-      const removeEnd = nextSection === -1 ? instructions.length : markerIdx + nextSection;
-      instructions = instructions.slice(0, markerIdx).trimEnd() + instructions.slice(removeEnd);
-      fs.writeFileSync(CODEX_INSTRUCTIONS_PATH, instructions);
+  try {
+    try {
+      fs.unlinkSync(CODEX_SKILL_PATH);
+    } catch {
+      /* ignore */
     }
-  }
+    try {
+      fs.rmdirSync(CODEX_SKILL_DIR);
+    } catch {
+      /* ignore */
+    }
+    try {
+      fs.unlinkSync(CODEX_LEGACY_SKILL_PATH);
+    } catch {
+      /* ignore */
+    }
 
-  return { success: true, message: 'Removed EchoCoding from Codex CLI' };
+    if (fs.existsSync(CODEX_INSTRUCTIONS_PATH)) {
+      const instructions = fs.readFileSync(CODEX_INSTRUCTIONS_PATH, 'utf-8');
+      writeTextFileAtomic(CODEX_INSTRUCTIONS_PATH, removeCodexInstructions(instructions));
+    }
+
+    return { success: true, message: 'Removed EchoCoding from Codex CLI' };
+  } catch (err) {
+    return {
+      success: false,
+      message: `Failed to uninstall Codex integration: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+function buildCodexInstructionsBlock(): string {
+  return [
+    CODEX_MANAGED_BLOCK_START,
+    '## EchoCoding Voice Mode',
+    'If the user explicitly asks for EchoCoding voice mode by saying `/echocoding`, `echocoding on`, `voice mode on`, `voice mode off`, or a level change such as `echocoding minimal`, load and follow the `echocoding` skill from `~/.codex/skills/echocoding/SKILL.md`.',
+    'Treat `/echocoding` as a user trigger phrase, not as a built-in Codex slash command.',
+    CODEX_MANAGED_BLOCK_END,
+  ].join('\n');
+}
+
+function upsertCodexInstructions(instructions: string): string {
+  const cleaned = stripCodexManagedText(instructions);
+  const block = buildCodexInstructionsBlock();
+  if (!cleaned.trim()) return block + '\n';
+  return cleaned + '\n\n' + block + '\n';
+}
+
+function removeCodexInstructions(instructions: string): string {
+  const cleaned = stripCodexManagedText(instructions);
+  return cleaned ? cleaned + '\n' : '';
+}
+
+function stripCodexManagedText(instructions: string): string {
+  let next = instructions.replace(/\r\n/g, '\n');
+
+  next = removeDelimitedBlock(next, CODEX_MANAGED_BLOCK_START, CODEX_MANAGED_BLOCK_END);
+  next = removeLegacyCodexBlock(next);
+
+  return tidyMarkdownText(next);
+}
+
+function removeDelimitedBlock(text: string, start: string, end: string): string {
+  let next = text;
+  while (true) {
+    const startIdx = next.indexOf(start);
+    if (startIdx === -1) return next;
+    const endIdx = next.indexOf(end, startIdx);
+    const removeEnd = endIdx === -1 ? next.length : endIdx + end.length;
+    next = next.slice(0, startIdx) + next.slice(removeEnd);
+  }
+}
+
+function removeLegacyCodexBlock(text: string): string {
+  const withMarker = new RegExp(
+    `\\n{0,2}${escapeRegex(CODEX_LEGACY_MARKER)}\\n${escapeRegex(CODEX_LEGACY_BLOCK)}\\n?`,
+    'g',
+  );
+  const withoutMarker = new RegExp(
+    `\\n{0,2}${escapeRegex(CODEX_LEGACY_BLOCK)}\\n?`,
+    'g',
+  );
+  return text.replace(withMarker, '\n').replace(withoutMarker, '\n');
+}
+
+function tidyMarkdownText(text: string): string {
+  return text
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function writeTextFileAtomic(filePath: string, content: string): void {
+  const dir = path.dirname(filePath);
+  fs.mkdirSync(dir, { recursive: true });
+  const tmpPath = filePath + '.tmp';
+  fs.writeFileSync(tmpPath, content, 'utf-8');
+  fs.renameSync(tmpPath, filePath);
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
