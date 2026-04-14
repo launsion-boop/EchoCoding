@@ -1,0 +1,55 @@
+{
+  "name": "echocoding",
+  "version": "0.1.0",
+  "description": "Immersive audio feedback for Vibe Coding — make your AI coding agent talk, listen, and feel alive",
+  "type": "module",
+  "main": "dist/src/index.js",
+  "bin": {
+    "echocoding": "dist/bin/echocoding.js",
+    "echocoding-hook": "dist/bin/echocoding-hook.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx bin/echocoding.ts",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "vibe-coding",
+    "claude-code",
+    "coding-agent",
+    "audio-feedback",
+    "tts",
+    "sound-effects",
+    "developer-tools"
+  ],
+  "author": "EchoClaw",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "dist/",
+    "sounds/",
+    "skills/",
+    "src/studio/index.html"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/EchoClaw/echocoding"
+  },
+  "homepage": "https://github.com/EchoClaw/echocoding",
+  "bugs": {
+    "url": "https://github.com/EchoClaw/echocoding/issues"
+  },
+  "dependencies": {
+    "commander": "^14.0.3",
+    "sherpa-onnx-node": "^1.12.38",
+    "yaml": "^2.8.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
+  }
+}

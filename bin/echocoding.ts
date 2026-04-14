@@ -1,0 +1,356 @@
+#!/usr/bin/env node
+
+import { Command } from 'commander';
+import { isDaemonRunning, stopDaemon } from '../src/daemon/server.js';
+import { sendSay, sendSfx, sendAsk, sendListen, pingDaemon } from '../src/daemon/client.js';
+import { installClaudeCode, uninstallClaudeCode, installCodex, uninstallCodex, detectInstalledAgents } from '../src/installer.js';
+import { getConfig, setConfigValue, getConfigValue, ensureConfigDir, saveConfig } from '../src/config.js';
+import { playSfx } from '../src/engines/sfx-engine.js';
+import { checkModels, downloadModels, hasEssentialModels } from '../src/downloader.js';
+import { startStudio } from '../src/studio/server.js';
+import { fork } from 'node:child_process';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const program = new Command();
+
+program
+  .name('echocoding')
+  .description('Immersive audio feedback for Vibe Coding')
+  .version('0.1.0');
+
+// --- install ---
+program
+  .command('install')
+  .description('Install EchoCoding hooks into your coding agent')
+  .option('--claude-code', 'Install for Claude Code only')
+  .option('--skip-models', 'Skip model download')
+  .action(async (opts) => {
+    const agents = detectInstalledAgents();
+
+    if (agents.length === 0) {
+      console.log('[echocoding] No supported coding agents detected.');
+      console.log('  Supported: Claude Code, Codex CLI');
+      process.exit(1);
+    }
+
+    console.log(`[echocoding] Detected agents: ${agents.join(', ')}`);
+
+    if (agents.includes('claude-code')) {
+      const result = installClaudeCode();
+      console.log(`[echocoding] Claude Code: ${result.message}`);
+    }
+
+    if (agents.includes('codex')) {
+      const result = installCodex();
+      console.log(`[echocoding] Codex CLI: ${result.message}`);
+    }
+
+    ensureConfigDir();
+
+    // Auto-download models if missing
+    if (!opts.skipModels && !hasEssentialModels()) {
+      console.log();
+      console.log('[echocoding] Models not found. Downloading required models...');
+      console.log('  (use --skip-models to skip this step)');
+      console.log();
+      await downloadModels();
+    } else if (!opts.skipModels) {
+      const statuses = checkModels();
+      const installed = statuses.filter((s) => s.installed).length;
+      console.log(`[echocoding] Models: ${installed}/${statuses.length} installed`);
+    }
+
+    console.log();
+    console.log('[echocoding] Installation complete!');
+    console.log('  In Claude Code: type /echocoding to start voice mode');
+    console.log('  In Codex CLI: say "echocoding on" or "/echocoding" to start');
+    console.log('  Run `echocoding studio` to preview and configure voices');
+  });
+
+// --- uninstall ---
+program
+  .command('uninstall')
+  .description('Remove EchoCoding hooks from your coding agent')
+  .action(() => {
+    const ccResult = uninstallClaudeCode();
+    console.log(`[echocoding] Claude Code: ${ccResult.message}`);
+
+    const cxResult = uninstallCodex();
+    console.log(`[echocoding] Codex CLI: ${cxResult.message}`);
+
+    const status = isDaemonRunning();
+    if (status.running) {
+      stopDaemon();
+      console.log('[echocoding] Daemon stopped.');
+    }
+  });
+
+// --- start ---
+program
+  .command('start')
+  .description('Start EchoCoding daemon')
+  .action(async () => {
+    const status = isDaemonRunning();
+    if (status.running) {
+      console.log(`[echocoding] Daemon already running (pid: ${status.pid})`);
+      return;
+    }
+
+    // Fork daemon as a detached background process
+    const daemonScript = path.resolve(__dirname, 'echocoding-daemon.js');
+    const child = fork(daemonScript, [], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    child.unref();
+
+    // Poll until daemon is ready (pid exists + socket reachable)
+    const maxWait = 3000;
+    const interval = 100;
+    let elapsed = 0;
+    const poll = async () => {
+      while (elapsed < maxWait) {
+        await sleep(interval);
+        elapsed += interval;
+        const check = isDaemonRunning();
+        if (check.running && await pingDaemon()) {
+          console.log(`[echocoding] Daemon started (pid: ${check.pid})`);
+          return;
+        }
+      }
+      console.error('[echocoding] Failed to start daemon (timeout)');
+      process.exit(1);
+    };
+    await poll();
+  });
+
+// --- stop ---
+program
+  .command('stop')
+  .description('Stop EchoCoding daemon')
+  .action(() => {
+    if (stopDaemon()) {
+      console.log('[echocoding] Daemon stopped.');
+    } else {
+      console.log('[echocoding] Daemon is not running.');
+    }
+  });
+
+// --- status ---
+program
+  .command('status')
+  .description('Show daemon status')
+  .action(async () => {
+    const status = isDaemonRunning();
+    if (status.running) {
+      const reachable = await pingDaemon();
+      console.log(`[echocoding] Daemon: running (pid: ${status.pid})`);
+      console.log(`[echocoding] Socket: ${reachable ? 'reachable' : 'unreachable'}`);
+    } else {
+      console.log('[echocoding] Daemon: not running');
+    }
+    const config = getConfig();
+    console.log(`[echocoding] Mode: ${config.mode}`);
+    console.log(`[echocoding] Volume: ${config.volume}`);
+    console.log(`[echocoding] TTS: ${config.tts.enabled ? 'enabled' : 'disabled'}`);
+    console.log(`[echocoding] SFX: ${config.sfx.enabled ? 'enabled' : 'disabled'}`);
+  });
+
+// --- say ---
+program
+  .command('say <text>')
+  .description('Speak text via TTS')
+  .action(async (text: string) => {
+    const sent = await sendSay(text);
+    if (!sent) {
+      console.error('[echocoding] Daemon not running. Run `echocoding start` first.');
+      process.exit(1);
+    }
+  });
+
+// --- ask ---
+program
+  .command('ask <question>')
+  .description('Speak a question via TTS, then listen for voice answer (stdout: recognized text)')
+  .action(async (question: string) => {
+    try {
+      const result = await sendAsk(question);
+      // Output result to stdout — this is how the model reads the user's answer
+      process.stdout.write(result + '\n');
+    } catch {
+      console.error('[echocoding] Daemon not running. Run `echocoding start` first.');
+      process.exit(1);
+    }
+  });
+
+// --- listen ---
+program
+  .command('listen')
+  .description('Open microphone and listen for voice input (stdout: recognized text)')
+  .action(async () => {
+    try {
+      const result = await sendListen();
+      process.stdout.write(result + '\n');
+    } catch {
+      console.error('[echocoding] Daemon not running. Run `echocoding start` first.');
+      process.exit(1);
+    }
+  });
+
+// --- sfx ---
+program
+  .command('sfx <name>')
+  .description('Play a sound effect')
+  .action(async (name: string) => {
+    const sent = await sendSfx(name);
+    if (!sent) {
+      // Fallback: play directly without daemon
+      playSfx(name);
+    }
+  });
+
+// --- test ---
+program
+  .command('test')
+  .description('Play test sound effects')
+  .action(async () => {
+    const effects = ['startup', 'submit', 'success', 'error', 'notification', 'complete', 'write', 'git-commit'];
+
+    console.log('[echocoding] Playing test sounds...');
+    for (const sfx of effects) {
+      console.log(`  ${sfx}`);
+      playSfx(sfx);
+      await sleep(800);
+    }
+    console.log('[echocoding] Test complete.');
+  });
+
+// --- config ---
+const configCmd = program
+  .command('config')
+  .description('Manage configuration');
+
+configCmd
+  .command('set <key> <value>')
+  .description('Set a config value (e.g., tts.endpoint, volume)')
+  .action((key: string, value: string) => {
+    setConfigValue(key, value);
+    console.log(`[echocoding] ${key} = ${getConfigValue(key)}`);
+  });
+
+configCmd
+  .command('get <key>')
+  .description('Get a config value')
+  .action((key: string) => {
+    const val = getConfigValue(key);
+    if (val === undefined) {
+      console.log(`[echocoding] ${key}: (not set)`);
+    } else {
+      console.log(`[echocoding] ${key} = ${JSON.stringify(val)}`);
+    }
+  });
+
+// --- volume ---
+program
+  .command('volume <level>')
+  .description('Set master volume (0-100)')
+  .action((level: string) => {
+    const vol = parseInt(level, 10);
+    if (isNaN(vol) || vol < 0 || vol > 100) {
+      console.error('[echocoding] Volume must be 0-100');
+      process.exit(1);
+    }
+    const config = getConfig();
+    config.volume = vol;
+    saveConfig(config);
+    console.log(`[echocoding] Volume set to ${vol}`);
+  });
+
+// --- mode ---
+program
+  .command('mode <mode>')
+  .description('Switch mode (full | sfx-only | voice-only | focus | mute)')
+  .action((mode: string) => {
+    const valid = ['full', 'sfx-only', 'voice-only', 'focus', 'mute'];
+    if (!valid.includes(mode)) {
+      console.error(`[echocoding] Invalid mode. Valid: ${valid.join(', ')}`);
+      process.exit(1);
+    }
+    const config = getConfig();
+    config.mode = mode as typeof config.mode;
+    saveConfig(config);
+    console.log(`[echocoding] Mode: ${mode}`);
+  });
+
+// --- tts-provider ---
+program
+  .command('tts-provider <provider>')
+  .description('Switch TTS provider (local | cloud)')
+  .action((provider: string) => {
+    const valid = ['local', 'cloud'];
+    if (!valid.includes(provider)) {
+      console.error(`[echocoding] Invalid provider. Valid: ${valid.join(', ')}`);
+      process.exit(1);
+    }
+    const config = getConfig();
+    config.tts.provider = provider as 'local' | 'cloud';
+    saveConfig(config);
+    console.log(`[echocoding] TTS provider: ${provider}`);
+    if (provider === 'local') {
+      console.log(`[echocoding] Engine: ${config.tts.engine} (emotion: ${config.tts.emotion ? 'on' : 'off'})`);
+    } else {
+      console.log(`[echocoding] Endpoint: ${config.tts.cloud.endpoint}`);
+    }
+  });
+
+// --- tts-engine ---
+program
+  .command('tts-engine <engine>')
+  .description('Switch local TTS engine (orpheus | kokoro | system)')
+  .action((engine: string) => {
+    const valid = ['orpheus', 'kokoro', 'system'];
+    if (!valid.includes(engine)) {
+      console.error(`[echocoding] Invalid engine. Valid: ${valid.join(', ')}`);
+      process.exit(1);
+    }
+    const config = getConfig();
+    config.tts.engine = engine as 'orpheus' | 'kokoro' | 'system';
+    config.tts.emotion = engine === 'orpheus'; // only Orpheus supports emotion
+    saveConfig(config);
+    console.log(`[echocoding] TTS engine: ${engine}`);
+    console.log(`[echocoding] Emotion tags: ${config.tts.emotion ? 'enabled' : 'disabled'}`);
+  });
+
+// --- download ---
+program
+  .command('download [models...]')
+  .description('Download TTS/ASR models (kokoro-tts, paraformer-asr, silero-vad)')
+  .action(async (models: string[]) => {
+    const statuses = checkModels();
+    console.log('[echocoding] Model status:');
+    for (const s of statuses) {
+      console.log(`  ${s.installed ? '✓' : '✗'} ${s.key} (${s.size}) — ${s.description}`);
+    }
+    console.log();
+    await downloadModels(models.length > 0 ? models : undefined);
+  });
+
+// --- studio ---
+program
+  .command('studio')
+  .description('Open voice preview & configuration panel in browser')
+  .option('-p, --port <number>', 'Preferred port (auto-detect if not specified)')
+  .action(async (opts) => {
+    const port = opts.port ? parseInt(opts.port, 10) : undefined;
+    await startStudio(port);
+  });
+
+program.parse();
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}

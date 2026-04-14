@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EchoCoding Studio</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface-hover: #1c2333;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-dim: #8b949e;
+    --accent: #58a6ff;
+    --accent-dim: #1f6feb;
+    --green: #3fb950;
+    --red: #f85149;
+    --orange: #d29922;
+    --radius: 8px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+    min-height: 100vh;
+  }
+
+  /* Header */
+  .header {
+    padding: 20px 32px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .header h1 { font-size: 20px; font-weight: 600; }
+  .header h1 span { color: var(--accent); }
+  .status-bar { display: flex; gap: 16px; font-size: 13px; }
+  .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+  .status-dot.on { background: var(--green); }
+  .status-dot.off { background: var(--red); }
+
+  /* Layout */
+  .container { max-width: 1200px; margin: 0 auto; padding: 24px 32px; }
+  .section { margin-bottom: 32px; }
+  .section-title {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .section-title .badge {
+    font-size: 11px;
+    padding: 2px 8px;
+    background: var(--accent-dim);
+    color: var(--accent);
+    border-radius: 12px;
+    font-weight: 500;
+  }
+
+  /* Preview text input */
+  .preview-input-row {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 16px;
+    align-items: center;
+  }
+  .preview-input-row input {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 8px 12px;
+    color: var(--text);
+    font-size: 14px;
+    outline: none;
+  }
+  .preview-input-row input:focus { border-color: var(--accent); }
+
+  /* Filter tabs */
+  .filter-tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+  }
+  .filter-tab {
+    padding: 6px 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    color: var(--text-dim);
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .filter-tab:hover { border-color: var(--accent); color: var(--text); }
+  .filter-tab.active { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
+
+  /* Speaker grid */
+  .speaker-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 10px;
+  }
+  .speaker-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+    position: relative;
+  }
+  .speaker-card:hover { border-color: var(--accent); background: var(--surface-hover); }
+  .speaker-card.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .speaker-card.playing { border-color: var(--green); }
+  .speaker-card .sid { font-size: 12px; color: var(--text-dim); }
+  .speaker-card .label { font-size: 14px; font-weight: 500; margin: 4px 0; }
+  .speaker-card .tags { display: flex; gap: 4px; }
+  .speaker-card .tag {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-weight: 500;
+  }
+  .tag-zh { background: #1a3a2a; color: var(--green); }
+  .tag-en { background: #1a2a3a; color: var(--accent); }
+  .tag-female { background: #2a1a3a; color: #d2a8ff; }
+  .tag-male { background: #2a2a1a; color: var(--orange); }
+  .speaker-card .actions {
+    margin-top: 8px;
+    display: flex;
+    gap: 6px;
+  }
+  .btn-sm {
+    font-size: 12px;
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .btn-sm:hover { border-color: var(--accent); color: var(--text); }
+  .btn-sm.primary { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
+  .btn-sm.primary:hover { background: var(--accent); color: #fff; }
+
+  .show-all-btn {
+    display: block;
+    width: 100%;
+    padding: 10px;
+    margin-top: 12px;
+    background: var(--surface);
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+    color: var(--text-dim);
+    font-size: 13px;
+    cursor: pointer;
+    text-align: center;
+    transition: all 0.15s;
+  }
+  .show-all-btn:hover { border-color: var(--accent); color: var(--text); }
+
+  /* SFX section */
+  .sfx-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 10px;
+  }
+  .sfx-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .sfx-card:hover { border-color: var(--accent); background: var(--surface-hover); }
+  .sfx-card.playing { border-color: var(--green); }
+  .sfx-card .sfx-icon { font-size: 24px; margin-bottom: 6px; }
+  .sfx-card .sfx-name { font-size: 13px; color: var(--text-dim); }
+
+  /* Settings */
+  .settings-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 16px;
+  }
+  .setting-item {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px;
+  }
+  .setting-item label {
+    display: block;
+    font-size: 13px;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+  }
+  .setting-item select, .setting-item input[type="range"] {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 8px;
+    color: var(--text);
+    font-size: 14px;
+  }
+  .setting-item input[type="range"] {
+    -webkit-appearance: none;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--border);
+    padding: 0;
+    border: none;
+    cursor: pointer;
+  }
+  .setting-item input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+  }
+  .slider-row { display: flex; align-items: center; gap: 10px; }
+  .slider-val { font-size: 14px; min-width: 36px; text-align: right; color: var(--accent); }
+
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .toggle {
+    position: relative;
+    width: 40px; height: 22px;
+    background: var(--border);
+    border-radius: 11px;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  .toggle.on { background: var(--accent-dim); }
+  .toggle::after {
+    content: '';
+    position: absolute;
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: var(--text);
+    top: 2px; left: 2px;
+    transition: transform 0.2s;
+  }
+  .toggle.on::after { transform: translateX(18px); background: var(--accent); }
+
+  /* Loading overlay */
+  .loading {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    height: 3px;
+    background: var(--accent);
+    animation: loading 1s ease-in-out infinite;
+    display: none;
+    z-index: 100;
+  }
+  .loading.active { display: block; }
+  @keyframes loading {
+    0% { transform: scaleX(0); transform-origin: left; }
+    50% { transform: scaleX(1); transform-origin: left; }
+    51% { transform-origin: right; }
+    100% { transform: scaleX(0); transform-origin: right; }
+  }
+</style>
+</head>
+<body>
+
+<div class="loading" id="loading"></div>
+
+<div class="header">
+  <h1><span>Echo</span>Coding Studio</h1>
+  <div class="status-bar">
+    <span><span class="status-dot" id="daemonDot"></span>Daemon: <span id="daemonStatus">checking...</span></span>
+    <span><span class="status-dot" id="modelDot"></span>Models: <span id="modelStatus">checking...</span></span>
+  </div>
+</div>
+
+<div class="container">
+  <!-- Voice Browser -->
+  <div class="section">
+    <div class="section-title">Voice Browser <span class="badge" id="voiceCount"></span></div>
+
+    <div class="preview-input-row">
+      <input type="text" id="previewText" value="你好，我是你的编程助手，很高兴认识你" placeholder="Preview text...">
+    </div>
+
+    <div class="filter-tabs" id="filterTabs">
+      <div class="filter-tab active" data-filter="recommended">Recommended</div>
+      <div class="filter-tab" data-filter="all">All</div>
+      <div class="filter-tab" data-filter="zh-female">Chinese Female</div>
+      <div class="filter-tab" data-filter="zh-male">Chinese Male</div>
+      <div class="filter-tab" data-filter="en">English</div>
+    </div>
+
+    <div class="speaker-grid" id="speakerGrid"></div>
+    <button class="show-all-btn" id="showAllBtn" style="display:none">Show All 103 Speakers</button>
+  </div>
+
+  <!-- SFX Preview -->
+  <div class="section">
+    <div class="section-title">Sound Effects</div>
+    <div class="sfx-grid" id="sfxGrid"></div>
+  </div>
+
+  <!-- Settings -->
+  <div class="section">
+    <div class="section-title">Settings</div>
+    <div class="settings-grid" id="settingsGrid"></div>
+  </div>
+</div>
+
+<script>
+  // --- State ---
+  let speakers = [];
+  let currentVoice = 'default';
+  let currentFilter = 'recommended';
+  let config = {};
+  let playingAudio = null;
+
+  const SFX_LIST = [
+    { name: 'startup', icon: '🚀' },
+    { name: 'submit', icon: '📤' },
+    { name: 'write', icon: '✏️' },
+    { name: 'typing', icon: '⌨️' },
+    { name: 'read', icon: '📖' },
+    { name: 'search', icon: '🔍' },
+    { name: 'working', icon: '💭' },
+    { name: 'thinking', icon: '🧠' },
+    { name: 'success', icon: '✅' },
+    { name: 'error', icon: '❌' },
+    { name: 'notification', icon: '🔔' },
+    { name: 'complete', icon: '🎉' },
+    { name: 'git-commit', icon: '📦' },
+    { name: 'git-push', icon: '🚢' },
+    { name: 'test-pass', icon: '🟢' },
+    { name: 'test-fail', icon: '🔴' },
+    { name: 'compact', icon: '🗜️' },
+    { name: 'agent-spawn', icon: '🔀' },
+    { name: 'agent-done', icon: '🔁' },
+    { name: 'install', icon: '📥' },
+    { name: 'delete', icon: '🗑️' },
+  ];
+
+  // --- API helpers ---
+  async function api(path, opts = {}) {
+    const res = await fetch(path, opts);
+    if (path.includes('/preview/tts')) return res;
+    return res.json();
+  }
+
+  function setLoading(on) {
+    document.getElementById('loading').classList.toggle('active', on);
+  }
+
+  // --- Init ---
+  async function init() {
+    const [speakerData, configData, statusData] = await Promise.all([
+      api('/api/speakers'),
+      api('/api/config'),
+      api('/api/status'),
+    ]);
+
+    speakers = speakerData.speakers;
+    currentVoice = speakerData.currentVoice;
+    config = configData;
+
+    // Status
+    const daemonOn = statusData.daemon.running;
+    document.getElementById('daemonDot').className = 'status-dot ' + (daemonOn ? 'on' : 'off');
+    document.getElementById('daemonStatus').textContent = daemonOn ? `running (pid: ${statusData.daemon.pid})` : 'stopped';
+
+    const modelsOk = statusData.models.every(m => m.installed);
+    document.getElementById('modelDot').className = 'status-dot ' + (modelsOk ? 'on' : 'off');
+    document.getElementById('modelStatus').textContent = modelsOk
+      ? `${statusData.models.filter(m => m.installed).length}/${statusData.models.length} installed`
+      : `${statusData.models.filter(m => m.installed).length}/${statusData.models.length} installed`;
+
+    document.getElementById('voiceCount').textContent = `${speakers.length} voices`;
+
+    renderSpeakers();
+    renderSFX();
+    renderSettings();
+    setupFilterTabs();
+  }
+
+  // --- Speaker rendering ---
+  function filterSpeakers(filter) {
+    switch (filter) {
+      case 'recommended': return speakers.filter(s => s.recommended);
+      case 'zh-female': return speakers.filter(s => s.lang === 'zh' && s.gender === 'female');
+      case 'zh-male': return speakers.filter(s => s.lang === 'zh' && s.gender === 'male');
+      case 'en': return speakers.filter(s => s.lang === 'en');
+      default: return speakers;
+    }
+  }
+
+  function renderSpeakers() {
+    const grid = document.getElementById('speakerGrid');
+    const filtered = filterSpeakers(currentFilter);
+    const showAllBtn = document.getElementById('showAllBtn');
+
+    // Show "Show All" button only when in recommended view
+    if (currentFilter === 'recommended') {
+      showAllBtn.style.display = 'block';
+      showAllBtn.textContent = `Show All ${speakers.length} Speakers`;
+    } else {
+      showAllBtn.style.display = 'none';
+    }
+
+    grid.innerHTML = filtered.map(s => `
+      <div class="speaker-card ${String(s.sid) === String(currentVoice) ? 'active' : ''}" data-sid="${s.sid}">
+        <div class="sid">SID ${s.sid}</div>
+        <div class="label">${s.label}</div>
+        <div class="tags">
+          <span class="tag tag-${s.lang}">${s.lang.toUpperCase()}</span>
+          <span class="tag tag-${s.gender}">${s.gender}</span>
+        </div>
+        <div class="actions">
+          <button class="btn-sm" onclick="previewVoice(${s.sid}, event)">Play</button>
+          <button class="btn-sm primary" onclick="setVoice(${s.sid}, event)">Use This</button>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  function setupFilterTabs() {
+    document.getElementById('filterTabs').addEventListener('click', (e) => {
+      const tab = e.target.closest('.filter-tab');
+      if (!tab) return;
+      document.querySelectorAll('.filter-tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      currentFilter = tab.dataset.filter;
+      renderSpeakers();
+    });
+
+    document.getElementById('showAllBtn').addEventListener('click', () => {
+      currentFilter = 'all';
+      document.querySelectorAll('.filter-tab').forEach(t => t.classList.remove('active'));
+      document.querySelector('[data-filter="all"]').classList.add('active');
+      renderSpeakers();
+    });
+  }
+
+  async function previewVoice(sid, e) {
+    if (e) e.stopPropagation();
+    if (playingAudio) { playingAudio.pause(); playingAudio = null; }
+
+    // Mark card as playing
+    document.querySelectorAll('.speaker-card').forEach(c => c.classList.remove('playing'));
+    const card = document.querySelector(`[data-sid="${sid}"]`);
+    if (card) card.classList.add('playing');
+
+    setLoading(true);
+    try {
+      const text = document.getElementById('previewText').value || '你好，我是你的编程助手';
+      const speed = config.tts?.speed || 1.0;
+      const res = await api('/api/preview/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, sid, speed }),
+      });
+
+      if (!res.ok) throw new Error('TTS failed');
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      playingAudio = new Audio(url);
+      playingAudio.onended = () => {
+        if (card) card.classList.remove('playing');
+        playingAudio = null;
+      };
+      playingAudio.play();
+    } catch (err) {
+      console.error('Preview failed:', err);
+      if (card) card.classList.remove('playing');
+    }
+    setLoading(false);
+  }
+
+  async function setVoice(sid, e) {
+    if (e) e.stopPropagation();
+    setLoading(true);
+    await api('/api/voice', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sid }),
+    });
+    currentVoice = String(sid);
+    renderSpeakers();
+    setLoading(false);
+  }
+
+  // --- SFX rendering ---
+  function renderSFX() {
+    const grid = document.getElementById('sfxGrid');
+    grid.innerHTML = SFX_LIST.map(s => `
+      <div class="sfx-card" data-sfx="${s.name}" onclick="playSFX('${s.name}', this)">
+        <div class="sfx-icon">${s.icon}</div>
+        <div class="sfx-name">${s.name}</div>
+      </div>
+    `).join('');
+  }
+
+  async function playSFX(name, el) {
+    if (playingAudio) { playingAudio.pause(); playingAudio = null; }
+
+    document.querySelectorAll('.sfx-card').forEach(c => c.classList.remove('playing'));
+    if (el) el.classList.add('playing');
+
+    try {
+      const res = await fetch(`/api/preview/sfx/${name}`);
+      if (!res.ok) throw new Error('SFX not found');
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      playingAudio = new Audio(url);
+      playingAudio.onended = () => {
+        if (el) el.classList.remove('playing');
+        playingAudio = null;
+      };
+      playingAudio.play();
+    } catch (err) {
+      console.error('SFX failed:', err);
+      if (el) el.classList.remove('playing');
+    }
+  }
+
+  // --- Settings rendering ---
+  function renderSettings() {
+    const grid = document.getElementById('settingsGrid');
+    grid.innerHTML = `
+      <div class="setting-item">
+        <label>Volume</label>
+        <div class="slider-row">
+          <input type="range" min="0" max="100" value="${config.volume || 70}" oninput="updateSetting('volume', this.value); this.nextElementSibling.textContent = this.value">
+          <span class="slider-val">${config.volume || 70}</span>
+        </div>
+      </div>
+      <div class="setting-item">
+        <label>Speed</label>
+        <div class="slider-row">
+          <input type="range" min="50" max="200" value="${(config.tts?.speed || 1.0) * 100}" oninput="updateSetting('tts.speed', this.value / 100); this.nextElementSibling.textContent = (this.value / 100).toFixed(1)">
+          <span class="slider-val">${(config.tts?.speed || 1.0).toFixed(1)}</span>
+        </div>
+      </div>
+      <div class="setting-item">
+        <label>Language</label>
+        <select onchange="updateSetting('tts.language', this.value)">
+          <option value="auto" ${config.tts?.language === 'auto' ? 'selected' : ''}>Auto</option>
+          <option value="zh" ${config.tts?.language === 'zh' ? 'selected' : ''}>Chinese</option>
+          <option value="en" ${config.tts?.language === 'en' ? 'selected' : ''}>English</option>
+        </select>
+      </div>
+      <div class="setting-item">
+        <label>Mode</label>
+        <select onchange="updateSetting('mode', this.value)">
+          ${['full', 'sfx-only', 'voice-only', 'focus', 'mute'].map(m =>
+            `<option value="${m}" ${config.mode === m ? 'selected' : ''}>${m}</option>`
+          ).join('')}
+        </select>
+      </div>
+      <div class="setting-item">
+        <div class="toggle-row">
+          <label>TTS Enabled</label>
+          <div class="toggle ${config.tts?.enabled ? 'on' : ''}" onclick="toggleSetting('tts.enabled', this)"></div>
+        </div>
+      </div>
+      <div class="setting-item">
+        <div class="toggle-row">
+          <label>SFX Enabled</label>
+          <div class="toggle ${config.sfx?.enabled ? 'on' : ''}" onclick="toggleSetting('sfx.enabled', this)"></div>
+        </div>
+      </div>
+    `;
+  }
+
+  async function updateSetting(key, value) {
+    await api('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, value }),
+    });
+    // Refresh config
+    config = await api('/api/config');
+  }
+
+  async function toggleSetting(key, el) {
+    const isOn = el.classList.contains('on');
+    el.classList.toggle('on');
+    await updateSetting(key, !isOn);
+  }
+
+  // --- Boot ---
+  init().catch(err => console.error('Init failed:', err));
+</script>
+</body>
+</html>
