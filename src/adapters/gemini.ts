@@ -15,6 +15,17 @@ function getMcpServerEntry(): { command: string; args: string[] } {
   };
 }
 
+function hasEchocodingMcpConfig(): boolean {
+  if (!fs.existsSync(GEMINI_SETTINGS_PATH)) return false;
+  try {
+    const parsed = parseJsonSafe(fs.readFileSync(GEMINI_SETTINGS_PATH, 'utf-8')) as Record<string, unknown>;
+    const mcpServers = parsed.mcpServers;
+    return !!mcpServers && typeof mcpServers === 'object' && 'echocoding' in mcpServers;
+  } catch {
+    return false;
+  }
+}
+
 export const geminiAdapter: ClientAdapter = {
   id: 'gemini',
   name: 'Gemini CLI',
@@ -25,6 +36,7 @@ export const geminiAdapter: ClientAdapter = {
     const detection: AdapterDetection = { installed };
     if (installed) {
       detection.configPath = GEMINI_SETTINGS_PATH;
+      detection.integrated = hasEchocodingMcpConfig();
     }
     return detection;
   },

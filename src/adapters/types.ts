@@ -1,5 +1,6 @@
 export interface AdapterDetection {
-  installed: boolean;
+  installed: boolean;       // agent itself is present (e.g. ~/.claude/ exists)
+  integrated?: boolean;     // EchoCoding hooks/config are injected into the agent
   version?: string;
   configPath?: string;
 }

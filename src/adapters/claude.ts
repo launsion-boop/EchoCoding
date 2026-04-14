@@ -87,6 +87,15 @@ export const claudeAdapter: ClientAdapter = {
     const detection: AdapterDetection = { installed };
     if (installed) {
       detection.configPath = CLAUDE_SETTINGS_PATH;
+      detection.integrated = false;
+      try {
+        if (fs.existsSync(CLAUDE_SETTINGS_PATH)) {
+          const raw = fs.readFileSync(CLAUDE_SETTINGS_PATH, 'utf-8');
+          detection.integrated = raw.includes('echocoding-hook');
+        }
+      } catch {
+        // Can't read settings - treat as not integrated
+      }
     }
     return detection;
   },

@@ -114,11 +114,13 @@ export async function runDoctor(): Promise<void> {
     } else {
       for (const adapter of list) {
         const detection = adapter.detect();
-        if (detection.installed) {
+        if (detection.integrated) {
           const ver = detection.version ? ` v${detection.version}` : '';
-          ok(adapter.name, `${adapter.mechanism}${ver}`);
+          ok(adapter.name, `integrated (${adapter.mechanism}${ver})`);
+        } else if (detection.installed) {
+          fail(adapter.name, `detected but EchoCoding not integrated — run: echocoding install`);
         } else {
-          fail(adapter.name, `not installed (${adapter.mechanism})`);
+          console.log(`  ${DIM}${adapter.name}: not installed${RESET}`);
         }
       }
     }
