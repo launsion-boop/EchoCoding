@@ -68,17 +68,15 @@ export function startDaemon(): void {
         conn.destroy();
         return;
       }
-    });
 
-    conn.on('end', () => {
-      if (!buffer.trim()) return;
-
-      // Support multiple JSON messages separated by newlines
-      for (const line of buffer.split('\n')) {
+      // Process complete lines immediately (don't wait for 'end')
+      // This is critical: sendWithResponse keeps the connection open for the reply.
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';  // Keep incomplete last line in buffer
+      for (const line of lines) {
         if (!line.trim()) continue;
         try {
           const msg = JSON.parse(line) as DaemonMessage;
-          // ask/listen need to send response back, so handle async with conn ref
           handleMessage(msg, conn);
         } catch {
           // Ignore malformed messages

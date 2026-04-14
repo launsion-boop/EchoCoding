@@ -92,7 +92,7 @@ const DEFAULT_CONFIG: EchoConfig = {
       appId: '',
       stream: true,
     },
-    voice: 'default',
+    voice: 'zh_female_wanwanxiaohe_moon_bigtts',
     speed: 1.0,
     language: 'auto',
     emotion: true,
@@ -113,7 +113,7 @@ const DEFAULT_CONFIG: EchoConfig = {
       apiKey: '',
       appId: '',
     },
-    timeout: 6,
+    timeout: 60,
   },
   sfx: {
     enabled: true,

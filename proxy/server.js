@@ -18,6 +18,9 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
 
 // --- Config from env ---
 const VOLC_APP_ID = process.env.VOLC_APP_ID || '';
@@ -124,55 +127,146 @@ async function volcTts(text, voiceType, speed) {
   return result.data; // base64 audio
 }
 
-// --- Volcengine ASR via V2 direct upload API ---
-// Simpler than V3: send base64 audio inline, get result immediately (no callback URL, no polling).
+// --- Volcengine ASR via V3 WebSocket (bigmodel_nostream) ---
+// Protocol: binary frames with 4-byte header + 4-byte payload_size + payload
+// Flow: connect → send full_client_request (JSON config) → send audio chunks → send final marker → receive result
 
 async function volcAsr(audioBase64, format, language) {
-  const reqid = crypto.randomUUID();
+  const WS = require('ws');
+  const audioBuf = Buffer.from(audioBase64, 'base64');
 
-  const body = JSON.stringify({
-    app: {
-      appid: VOLC_APP_ID,
-      token: VOLC_ACCESS_TOKEN,
-      cluster: 'volcengine_streaming_common',
-    },
+  // V3 full_client_request payload
+  const configPayload = JSON.stringify({
     user: { uid: 'echocoding-proxy' },
     audio: {
       format: format === 'webm' ? 'ogg_opus' : format,
       rate: 16000,
       bits: 16,
       channel: 1,
-      language: language || 'zh-CN',
+      codec: 'raw',
     },
     request: {
-      reqid,
-      sequence: -1,
-      nbest: 1,
-      text: audioBase64,
+      model_name: 'bigmodel',
+      enable_itn: true,
+      enable_punc: true,
+      result_type: 'full',
+      language: language === 'en-US' ? 'en' : 'zh',
     },
   });
 
-  const response = await fetch('https://openspeech.bytedance.com/api/v2/asr', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer;${VOLC_ACCESS_TOKEN}`,
-    },
-    body,
+  return new Promise((resolve, reject) => {
+    const wsUrl = 'wss://openspeech.bytedance.com/api/v3/sauc/bigmodel';
+    const ws = new WS(wsUrl, {
+      skipUTF8Validation: true,
+      headers: {
+        'X-Api-App-Key': VOLC_APP_ID,
+        'X-Api-Access-Key': VOLC_ACCESS_TOKEN,
+        'X-Api-Resource-Id': 'volc.bigasr.sauc.duration',
+        'X-Api-Connect-Id': crypto.randomUUID(),
+      },
+    });
+    let done = false;
+
+    const finish = (err, text) => {
+      if (done) return;
+      done = true;
+      try { ws.close(); } catch {}
+      if (err) reject(err);
+      else resolve(text);
+    };
+
+    const timeout = setTimeout(() => {
+      finish(new Error('ASR WebSocket timeout after 30 seconds'));
+    }, 30_000);
+
+    // Build binary frame: [4B header] [4B payload_size_BE] [payload]
+    function buildFrame(msgType, flags, serialization, payload) {
+      const header = Buffer.alloc(4);
+      header[0] = 0x11;  // version=1, header_size=1
+      header[1] = (msgType << 4) | (flags & 0x0f);
+      header[2] = (serialization << 4) | 0x00;  // no compression
+      header[3] = 0x00;
+      const sizeBuf = Buffer.alloc(4);
+      sizeBuf.writeUInt32BE(payload.length, 0);
+      return Buffer.concat([header, sizeBuf, payload]);
+    }
+
+    ws.on('open', () => {
+      // 1. Send full_client_request (msg_type=0x1, serialization=JSON=0x1)
+      const configBuf = Buffer.from(configPayload, 'utf-8');
+      ws.send(buildFrame(0x1, 0x0, 0x1, configBuf));
+
+      // 2. Send audio data in chunks (msg_type=0x2)
+      const CHUNK_SIZE = 8000;  // 8KB chunks
+      for (let i = 0; i < audioBuf.length; i += CHUNK_SIZE) {
+        const chunk = audioBuf.slice(i, i + CHUNK_SIZE);
+        const isLast = (i + CHUNK_SIZE) >= audioBuf.length;
+        ws.send(buildFrame(0x2, isLast ? 0x2 : 0x0, 0x0, chunk));
+      }
+
+      // 3. If audio was empty, send final empty marker
+      if (audioBuf.length === 0) {
+        ws.send(buildFrame(0x2, 0x2, 0x0, Buffer.alloc(0)));
+      }
+    });
+
+    ws.on('message', (data) => {
+      try {
+        const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+        if (buf.length < 4) return;
+
+        const msgType = (buf[1] >> 4) & 0x0f;
+
+        // Parse payload: skip 4-byte header, read 4-byte size, then payload
+        if (buf.length < 8) return;
+        // V3: [4B header] [4B reserved] [4B payload_size] [payload] or [4B header] [4B size] [payload]
+        // Try offset 8 first (with reserved), then offset 4 (without)
+        let jsonStr;
+        for (const offset of [12, 8, 4]) {
+          if (buf.length <= offset) continue;
+          try {
+            const slice = buf.slice(offset);
+            jsonStr = slice.toString('utf-8').trim();
+            if (jsonStr.startsWith('{')) { JSON.parse(jsonStr); break; }
+            jsonStr = null;
+          } catch { jsonStr = null; }
+        }
+
+        if (!jsonStr) return;
+        const result = JSON.parse(jsonStr);
+
+        // V3 error response (msg_type=0xf)
+        if (msgType === 0xf) {
+          clearTimeout(timeout);
+          finish(new Error(`ASR error: ${result.error || result.message || JSON.stringify(result).slice(0, 200)}`));
+          return;
+        }
+
+        // V3 ASR result (msg_type=0x9)
+        // Byte 1: 0x91 = intermediate, 0x93 = final (flags bit 1 = final)
+        const isFinal = (buf[1] & 0x02) !== 0;
+        const text = result.result?.text || '';
+
+        if (isFinal && text) {
+          clearTimeout(timeout);
+          finish(null, text.trim());
+        }
+        // Intermediate results: keep waiting for final
+      } catch (e) {
+        console.error('[ASR] Parse error:', e.message);
+      }
+    });
+
+    ws.on('error', (err) => {
+      clearTimeout(timeout);
+      finish(new Error(`ASR WebSocket error: ${err.message || 'connection failed'}`));
+    });
+
+    ws.on('close', () => {
+      clearTimeout(timeout);
+      if (!done) finish(new Error('ASR WebSocket closed without result'));
+    });
   });
-
-  if (!response.ok) {
-    const errText = await response.text().catch(() => '');
-    throw new Error(`Volcengine ASR HTTP ${response.status}: ${errText.slice(0, 200)}`);
-  }
-
-  const result = await response.json();
-
-  if (result.code !== 1000 || !result.result?.[0]?.text) {
-    throw new Error(`Volcengine ASR failed: ${result.message || `code ${result.code}`}`);
-  }
-
-  return result.result[0].text.trim();
 }
 
 // --- HTTP Server ---

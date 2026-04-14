@@ -4,6 +4,7 @@ import { Command } from 'commander';
 import { isDaemonRunning, stopDaemon } from '../src/daemon/server.js';
 import { sendSay, sendSfx, sendAsk, sendListen, sendWithResponse, pingDaemon } from '../src/daemon/client.js';
 import { installClaudeCode, uninstallClaudeCode, installCodex, uninstallCodex, detectInstalledAgents } from '../src/installer.js';
+import { detectInstalledClients, getAllAdapters } from '../src/adapters/registry.js';
 import { getConfig, setConfigValue, getConfigValue, ensureConfigDir, saveConfig } from '../src/config.js';
 import { playSfx } from '../src/engines/sfx-engine.js';
 import { checkModels, downloadModels, hasEssentialModels } from '../src/downloader.js';
@@ -29,18 +30,32 @@ program
   .command('install')
   .description('Install EchoCoding hooks into your coding agent')
   .option('--claude-code', 'Install for Claude Code only')
+  .option('--auto', 'Non-interactive, skip prompts')
+  .option('--start', 'Start daemon after install')
   .option('--local-models', 'Download local TTS/ASR models (~1GB)')
   .option('--skip-models', 'Skip model download (deprecated, cloud is default)')
   .action(async (opts) => {
-    const agents = detectInstalledAgents();
+    // Use adapter registry to detect and install all supported agents
+    const allAdapters = getAllAdapters();
+    const installed = allAdapters.filter((a) => a.detect().installed);
 
-    if (agents.length === 0) {
+    if (installed.length === 0) {
       console.log('[echocoding] No supported coding agents detected.');
-      console.log('  Supported: Claude Code, Codex CLI');
+      console.log('  Supported: Claude Code, Codex CLI, Cursor, Windsurf, Gemini CLI');
       process.exit(1);
     }
 
-    console.log(`[echocoding] Detected agents: ${agents.join(', ')}`);
+    // If --claude-code, filter to Claude only
+    const targets = opts.claudeCode
+      ? installed.filter((a) => a.id === 'claude-code')
+      : installed;
+
+    if (targets.length === 0) {
+      console.log('[echocoding] Claude Code not detected.');
+      process.exit(1);
+    }
+
+    console.log(`[echocoding] Detected agents: ${targets.map((a) => a.id).join(', ')}`);
 
     // Check & install system dependencies (sox, etc.)
     console.log();
@@ -66,14 +81,11 @@ program
       console.log('[echocoding] System dependencies: OK');
     }
 
-    if (agents.includes('claude-code')) {
-      const result = installClaudeCode();
-      console.log(`[echocoding] Claude Code: ${result.message}`);
-    }
-
-    if (agents.includes('codex')) {
-      const result = installCodex();
-      console.log(`[echocoding] Codex CLI: ${result.message}`);
+    // Install each detected adapter
+    for (const adapter of targets) {
+      const result = adapter.install();
+      const icon = result.success ? '✓' : '✗';
+      console.log(`[echocoding] ${icon} ${adapter.id}: ${result.message}`);
     }
 
     ensureConfigDir();
@@ -109,11 +121,35 @@ program
       }
     }
 
+    // --start: auto-start daemon
+    if (opts.start) {
+      const status = isDaemonRunning();
+      if (!status.running) {
+        const daemonScript = path.resolve(__dirname, 'echocoding-daemon.js');
+        const child = fork(daemonScript, [], { detached: true, stdio: 'ignore' });
+        child.unref();
+        // Wait for daemon to be ready
+        for (let i = 0; i < 30; i++) {
+          await new Promise((r) => setTimeout(r, 100));
+          if (isDaemonRunning().running) break;
+        }
+        console.log('[echocoding] Daemon started.');
+      }
+    }
+
     console.log();
     console.log('[echocoding] Installation complete!');
     console.log('  In Claude Code: type /echocoding to start voice mode');
     console.log('  In Cursor/Windsurf: MCP tools available automatically');
-    console.log('  Run `echocoding studio` to configure voices and download local models');
+    console.log('  Run `echocoding studio` to configure voices and preview sounds');
+
+    // Auto-open Studio so user can see settings
+    if (opts.start || opts.auto) {
+      console.log();
+      console.log('[echocoding] Opening Studio...');
+      const { exec } = await import('node:child_process');
+      startStudio(9876);
+    }
   });
 
 // --- uninstall ---
@@ -121,11 +157,14 @@ program
   .command('uninstall')
   .description('Remove EchoCoding hooks from your coding agent')
   .action(() => {
-    const ccResult = uninstallClaudeCode();
-    console.log(`[echocoding] Claude Code: ${ccResult.message}`);
-
-    const cxResult = uninstallCodex();
-    console.log(`[echocoding] Codex CLI: ${cxResult.message}`);
+    // Uninstall all detected adapters
+    for (const adapter of getAllAdapters()) {
+      if (adapter.detect().installed) {
+        const result = adapter.uninstall();
+        const icon = result.success ? '✓' : '✗';
+        console.log(`[echocoding] ${icon} ${adapter.id}: ${result.message}`);
+      }
+    }
 
     const status = isDaemonRunning();
     if (status.running) {
@@ -228,7 +267,11 @@ program
   .description('Speak a question via TTS, then listen for voice answer (stdout: recognized text)')
   .action(async (question: string) => {
     // TTS via daemon, then record + ASR in foreground (daemon can't access mic)
-    await sendSay(question);
+    const sent = await sendSay(question);
+    if (!sent) {
+      console.error('[echocoding] Daemon not running. Run `echocoding start` first.');
+      process.exit(1);
+    }
     await new Promise((r) => setTimeout(r, 1500));
     try {
       const { listen } = await import('../src/engines/asr-engine.js');
