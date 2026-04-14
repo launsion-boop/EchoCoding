@@ -435,7 +435,8 @@ async function callVolcengineAsr(
     throw new Error(`Volcengine ASR failed: ${result.message || result.code}`);
   }
 
-  return result.result[0].text.trim();
+  const text = result.result[0].text.trim();
+  return text || '[empty]';
 }
 
 /**
@@ -474,7 +475,8 @@ async function callProxyAsr(audioBase64: string, endpoint: string): Promise<stri
     throw new Error(`Proxy ASR: ${result.error}`);
   }
 
-  return result.text?.trim() ?? '[empty]';
+  const text = result.text?.trim();
+  return text || '[empty]';
 }
 
 // --- Cleanup ---
