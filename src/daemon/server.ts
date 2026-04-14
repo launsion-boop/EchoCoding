@@ -1,7 +1,7 @@
 import net from 'node:net';
 import fs from 'node:fs';
 import { getConfig, ensureConfigDir, resolveDaemonPaths } from '../config.js';
-import { playSfx } from '../engines/sfx-engine.js';
+import { playSfx, playSfxAmbient } from '../engines/sfx-engine.js';
 import { speak, cleanupTempFiles, disposeTts } from '../engines/voice-engine.js';
 import { listen, ask, disposeAsr } from '../engines/asr-engine.js';
 import { handleHookEvent, parseHookEvent, setAmbientControls } from '../hook-handler.js';
@@ -28,8 +28,8 @@ export function startAmbient(sfxName: string, intervalMs = 3500): void {
   if (ambientName === sfxName && ambientInterval) return; // already playing
   stopAmbient();
   ambientName = sfxName;
-  playSfx(sfxName); // play immediately
-  ambientInterval = setInterval(() => playSfx(sfxName), intervalMs);
+  playSfxAmbient(sfxName); // play immediately (no throttle)
+  ambientInterval = setInterval(() => playSfxAmbient(sfxName), intervalMs);
 }
 
 /** Stop any running ambient loop. */

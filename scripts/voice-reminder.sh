@@ -5,6 +5,22 @@
 # Must be fast (<10ms) — pure shell, no Node.js.
 
 CONFIG="$HOME/.echocoding/config.yaml"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HOOK_BIN="$SCRIPT_DIR/../dist/bin/echocoding-hook.js"
+NODE_BIN="${ECHOCODING_NODE:-$(command -v node 2>/dev/null || true)}"
+
+forward_user_prompt_submit_hook() {
+  # Best-effort: if Codex executes only the first UserPromptSubmit group,
+  # still forward the submit event so thinking ambient can start.
+  [ -n "$NODE_BIN" ] || return 0
+  [ -f "$HOOK_BIN" ] || return 0
+  (
+    printf '{"hook_event_name":"UserPromptSubmit"}' \
+      | ECHOCODING_CLIENT="${ECHOCODING_CLIENT:-codex}" "$NODE_BIN" "$HOOK_BIN" >/dev/null 2>&1
+  ) &
+}
+
+forward_user_prompt_submit_hook
 
 # Bail silently if config missing
 [ -f "$CONFIG" ] || exit 0

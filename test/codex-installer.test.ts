@@ -84,12 +84,15 @@ test('installCodex writes a Codex skill directory and migrates legacy instructio
   assert.equal(Array.isArray(hooks.hooks?.SubagentStart), true);
   assert.equal(Array.isArray(hooks.hooks?.SubagentStop), true);
   assert.equal(Array.isArray(hooks.hooks?.PreCompact), true);
+  const sessionStartCommands = hooks.hooks.SessionStart
+    .flatMap((g: { hooks: Array<{ command?: string }> }) => g.hooks.map((h) => h.command))
+    .join('\n');
   assert.match(
-    hooks.hooks.SessionStart[0].hooks[0].command + hooks.hooks.SessionStart[1].hooks[0].command,
+    sessionStartCommands,
     /echocoding-hook/,
   );
   assert.match(
-    hooks.hooks.SessionStart[0].hooks[0].command + hooks.hooks.SessionStart[1].hooks[0].command,
+    sessionStartCommands,
     /ECHOCODING_CLIENT=codex .*auto-start\.sh/,
   );
   assert.match(
@@ -103,16 +106,33 @@ test('installCodex writes a Codex skill directory and migrates legacy instructio
   assert.equal(
     hooks.hooks.SessionStart.find((g: { hooks: Array<{ command?: string; statusMessage?: string }> }) =>
       g.hooks.some((h) => h.command?.includes('auto-start')),
-    ).hooks[0].statusMessage,
+    ).hooks.find((h: { command?: string }) => h.command?.includes('auto-start')).statusMessage,
     'Starting EchoCoding daemon',
   );
+  assert.equal(
+    hooks.hooks.SessionStart.some((g: { hooks: Array<{ command?: string }> }) =>
+      g.hooks.some((h) => h.command?.includes('auto-start')) &&
+      g.hooks.some((h) => h.command?.includes('echocoding-hook')),
+    ),
+    true,
+  );
+  const userPromptSubmitCommands = hooks.hooks.UserPromptSubmit
+    .flatMap((g: { hooks: Array<{ command?: string }> }) => g.hooks.map((h) => h.command))
+    .join('\n');
   assert.match(
-    hooks.hooks.UserPromptSubmit.map((g: { hooks: Array<{ command?: string }> }) => g.hooks[0].command).join('\n'),
+    userPromptSubmitCommands,
     /echocoding-hook/,
   );
   assert.match(
-    hooks.hooks.UserPromptSubmit.map((g: { hooks: Array<{ command?: string }> }) => g.hooks[0].command).join('\n'),
+    userPromptSubmitCommands,
     /ECHOCODING_HOOK_CLIENT=codex ECHOCODING_CLIENT=codex .*voice-reminder\.sh/,
+  );
+  assert.equal(
+    hooks.hooks.UserPromptSubmit.some((g: { hooks: Array<{ command?: string }> }) =>
+      g.hooks.some((h) => h.command?.includes('voice-reminder')) &&
+      g.hooks.some((h) => h.command?.includes('echocoding-hook')),
+    ),
+    true,
   );
 });
 
@@ -173,8 +193,22 @@ test('installCodex is idempotent and uninstallCodex removes managed artifacts wh
 
   const hooksAfterInstall = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
   assert.equal(hooksAfterInstall.hooks.Stop.length >= 2, true);
-  assert.equal(hooksAfterInstall.hooks.SessionStart.length >= 2, true);
-  assert.equal(hooksAfterInstall.hooks.UserPromptSubmit.length >= 2, true);
+  assert.equal(hooksAfterInstall.hooks.SessionStart.length >= 1, true);
+  assert.equal(hooksAfterInstall.hooks.UserPromptSubmit.length >= 1, true);
+  assert.equal(
+    hooksAfterInstall.hooks.SessionStart.some((g: { hooks: Array<{ command?: string }> }) =>
+      g.hooks.some((h) => h.command?.includes('auto-start')) &&
+      g.hooks.some((h) => h.command?.includes('echocoding-hook')),
+    ),
+    true,
+  );
+  assert.equal(
+    hooksAfterInstall.hooks.UserPromptSubmit.some((g: { hooks: Array<{ command?: string }> }) =>
+      g.hooks.some((h) => h.command?.includes('voice-reminder')) &&
+      g.hooks.some((h) => h.command?.includes('echocoding-hook')),
+    ),
+    true,
+  );
   assert.equal(Array.isArray(hooksAfterInstall.hooks.PreToolUse), true);
   assert.equal(Array.isArray(hooksAfterInstall.hooks.PostToolUse), true);
   assert.equal(Array.isArray(hooksAfterInstall.hooks.Notification), true);

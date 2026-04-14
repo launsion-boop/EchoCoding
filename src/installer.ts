@@ -493,9 +493,14 @@ function readCodexHooksFile(): CodexHooksFile {
 function upsertCodexHooks(config: CodexHooksFile): CodexHooksFile {
   const next: CodexHooksFile = { ...config, hooks: { ...(config.hooks ?? {}) } };
 
-  upsertCodexHookGroup(next.hooks!, 'SessionStart', 'echocoding-hook', {
+  upsertCodexManagedGroup(next.hooks!, 'SessionStart', ['echocoding-hook', 'auto-start'], {
     matcher: 'startup|resume',
     hooks: [
+      {
+        type: 'command',
+        command: getCodexAutoStartCommand(),
+        statusMessage: 'Starting EchoCoding daemon',
+      },
       {
         type: 'command',
         command: getCodexHookCommand(),
@@ -503,8 +508,12 @@ function upsertCodexHooks(config: CodexHooksFile): CodexHooksFile {
     ],
   });
 
-  upsertCodexHookGroup(next.hooks!, 'UserPromptSubmit', 'echocoding-hook', {
+  upsertCodexManagedGroup(next.hooks!, 'UserPromptSubmit', ['echocoding-hook', 'voice-reminder'], {
     hooks: [
+      {
+        type: 'command',
+        command: getCodexVoiceReminderCommand(),
+      },
       {
         type: 'command',
         command: getCodexHookCommand(),
@@ -513,7 +522,7 @@ function upsertCodexHooks(config: CodexHooksFile): CodexHooksFile {
   });
 
   for (const eventName of ['PreToolUse', 'PostToolUse', 'Notification', 'Stop', 'SubagentStart', 'SubagentStop', 'PreCompact']) {
-    upsertCodexHookGroup(next.hooks!, eventName, 'echocoding-hook', {
+    upsertCodexManagedGroup(next.hooks!, eventName, ['echocoding-hook'], {
       hooks: [
         {
           type: 'command',
@@ -522,26 +531,6 @@ function upsertCodexHooks(config: CodexHooksFile): CodexHooksFile {
       ],
     });
   }
-
-  upsertCodexHookGroup(next.hooks!, 'SessionStart', 'auto-start', {
-    matcher: 'startup|resume',
-    hooks: [
-      {
-        type: 'command',
-        command: getCodexAutoStartCommand(),
-        statusMessage: 'Starting EchoCoding daemon',
-      },
-    ],
-  });
-
-  upsertCodexHookGroup(next.hooks!, 'UserPromptSubmit', 'voice-reminder', {
-    hooks: [
-      {
-        type: 'command',
-        command: getCodexVoiceReminderCommand(),
-      },
-    ],
-  });
 
   return next;
 }
@@ -578,46 +567,30 @@ function removeCodexHooks(config: CodexHooksFile): CodexHooksFile {
   return next;
 }
 
-function upsertCodexHookGroup(
+function upsertCodexManagedGroup(
   hooks: Record<string, CodexHookMatcher[]>,
   eventName: string,
-  commandNeedle: string,
+  managedCommandNeedles: string[],
   desiredGroup: CodexHookMatcher,
 ): void {
   const groups = hooks[eventName] ?? [];
-  const normalized: CodexHookMatcher[] = [];
-  let inserted = false;
+  const normalized: CodexHookMatcher[] = groups
+    .map((group) => {
+      const retainedHooks = group.hooks.filter(
+        (hook) => !managedCommandNeedles.some((needle) => hook.command.includes(needle)),
+      );
+      if (retainedHooks.length === 0) return null;
+      return {
+        ...group,
+        hooks: retainedHooks,
+      };
+    })
+    .filter((group): group is CodexHookMatcher => group !== null);
 
-  for (const group of groups) {
-    const retainedHooks = group.hooks.filter((hook) => !hook.command.includes(commandNeedle));
-
-    if (retainedHooks.length !== group.hooks.length) {
-      if (!inserted) {
-        normalized.push({
-          ...desiredGroup,
-          hooks: desiredGroup.hooks.map((hook) => ({ ...hook })),
-        });
-        inserted = true;
-      }
-
-      if (retainedHooks.length > 0) {
-        normalized.push({
-          ...group,
-          hooks: retainedHooks,
-        });
-      }
-      continue;
-    }
-
-    normalized.push(group);
-  }
-
-  if (!inserted) {
-    normalized.push({
-      ...desiredGroup,
-      hooks: desiredGroup.hooks.map((hook) => ({ ...hook })),
-    });
-  }
+  normalized.push({
+    ...desiredGroup,
+    hooks: desiredGroup.hooks.map((hook) => ({ ...hook })),
+  });
 
   hooks[eventName] = normalized;
 }
