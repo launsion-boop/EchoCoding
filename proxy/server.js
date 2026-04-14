@@ -199,10 +199,18 @@ async function volcAsr(audioBase64, format, language) {
     // we send header_size=1 (4B), but the server may use header_size=2 (8B header + 4B size).
     // Try all plausible offsets in order.
     function parseFrameJson(buf) {
-      const headerWords = buf[0] & 0x0f;          // typically 1 or 2
-      const baseOffset = headerWords * 4;          // 4 or 8
-      const payloadStart = baseOffset + 4;         // skip payload-size field
-      for (const offset of [payloadStart, baseOffset + 4, 8, 4]) {
+      // V3 server response frame layout:
+      //   [4B header] [4B sequence] [4B payload_size BE] [JSON payload]
+      // Payload always starts at offset 12.
+      if (buf.length > 12) {
+        try {
+          const payloadSize = buf.readUInt32BE(8);
+          const json = buf.slice(12, 12 + payloadSize).toString('utf-8');
+          return JSON.parse(json);
+        } catch { /* fall through to brute-force */ }
+      }
+      // Fallback: try common offsets
+      for (const offset of [12, 8]) {
         if (buf.length <= offset) continue;
         try {
           const s = buf.slice(offset).toString('utf-8').trim();

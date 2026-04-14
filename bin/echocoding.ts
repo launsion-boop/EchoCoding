@@ -267,13 +267,14 @@ program
   .command('ask <question>')
   .description('Speak a question via TTS, then listen for voice answer (stdout: recognized text)')
   .action(async (question: string) => {
-    // TTS via daemon, then record + ASR in foreground (daemon can't access mic)
-    const sent = await sendSay(question);
-    if (!sent) {
+    // TTS via daemon (blocking — wait for playback to finish), then record + ASR in foreground
+    try {
+      await sendWithResponse({ type: 'say', text: question }, 15_000);
+    } catch {
       console.error('[echocoding] Daemon not running. Run `echocoding start` first.');
       process.exit(1);
     }
-    await new Promise((r) => setTimeout(r, 1500));
+    await new Promise((r) => setTimeout(r, 500)); // gap after TTS before opening mic
     try {
       const { listen } = await import('../src/engines/asr-engine.js');
       const result = await listen();

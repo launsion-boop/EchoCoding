@@ -138,30 +138,22 @@ async function listenLocal(timeoutSec: number): Promise<string> {
 async function recordViaMicHelper(timeoutSec: number, outFile: string): Promise<string | null> {
   const helper = getMicHelperPath();
   if (!helper) return null;
-  if (!ensureMicAuthorized()) {
-    lastRecordError = 'Microphone permission denied. Please allow microphone access for your coding client, then retry.';
-    return null;
-  }
+
+  // Resolve the .app bundle path from the shell wrapper
+  const appPath = path.join(path.dirname(helper), 'MicHelper.app');
+  if (!fs.existsSync(appPath)) return null;
 
   return new Promise((resolve) => {
-    let stderr = '';
-    const child = spawn(helper, ['record', String(timeoutSec), outFile], {
-      stdio: ['ignore', 'ignore', 'pipe'],
+    // Launch via `open -W -n` (Launch Services, new instance) so macOS TCC grants
+    // mic permission to MicHelper.app's own bundle ID, independent of the parent process.
+    const child = spawn('open', ['-W', '-n', appPath, '--args', 'record', String(timeoutSec), outFile], {
+      stdio: 'ignore',
     });
 
-    child.stderr?.setEncoding('utf-8');
-    child.stderr?.on('data', (chunk: string) => {
-      stderr += chunk;
-    });
-
-    child.on('close', (code) => {
-      if (code === 0 && fs.existsSync(outFile) && fs.statSync(outFile).size > 44) {
+    child.on('close', () => {
+      if (fs.existsSync(outFile) && fs.statSync(outFile).size > 44) {
         resolve(outFile);
       } else {
-        const lower = stderr.toLowerCase();
-        if (lower.includes('permission denied') || lower.includes('microphone permission denied')) {
-          lastRecordError = 'Microphone permission denied. Please allow microphone access for your coding client, then retry.';
-        }
         resolve(null);
       }
     });
@@ -194,13 +186,12 @@ async function recordMicrophone(timeoutSec: number): Promise<string | null> {
   const outFile = path.join(TEMP_DIR, `rec-${Date.now()}.wav`);
   const platform = os.platform();
 
-  // macOS: prefer mic-helper for proper permission handling
+  // macOS: try MicHelper.app via Launch Services for independent TCC mic permission.
+  // Falls through to sox if mic-helper unavailable or fails.
   if (platform === 'darwin') {
     const result = await recordViaMicHelper(timeoutSec, outFile);
     if (result) return result;
-    // If user denied mic permission in helper, surface it directly.
-    if (lastRecordError) return null;
-    // Fall through to sox only when helper is unavailable/non-permission failure.
+    lastRecordError = null; // clear — sox may succeed where mic-helper failed
   }
 
   return new Promise((resolve) => {
