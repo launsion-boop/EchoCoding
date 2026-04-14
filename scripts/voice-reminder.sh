@@ -12,6 +12,15 @@ CONFIG="$HOME/.echocoding/config.yaml"
 # Read mode and voiceLevel (simple grep, no YAML parser needed)
 MODE=$(grep "^mode:" "$CONFIG" 2>/dev/null | awk '{print $2}')
 LEVEL=$(grep "^voiceLevel:" "$CONFIG" 2>/dev/null | awk '{print $2}')
+CLIENT="${ECHOCODING_HOOK_CLIENT:-claude}"
+
+emit_reminder() {
+  if [ "$CLIENT" = "codex" ]; then
+    echo "$2"
+  else
+    echo "$1"
+  fi
+}
 
 # Only remind when voice is active (full or voice-only modes)
 case "$MODE" in
@@ -21,10 +30,14 @@ esac
 
 case "$LEVEL" in
   balanced)
-    echo "<user-prompt-submit-hook>💡 平衡模式：评估本次回复是否需要语音播报。如果有重要信息、阶段性结论或需要用户关注的内容，建议先 echocoding say 一句摘要。纯工具调用或简短确认可以不说。</user-prompt-submit-hook>"
+    emit_reminder \
+      "<user-prompt-submit-hook>💡 平衡模式：评估本次回复是否需要语音播报。如果有重要信息、阶段性结论或需要用户关注的内容，建议先 echocoding say 一句摘要。纯工具调用或简短确认可以不说。</user-prompt-submit-hook>" \
+      "EchoCoding 平衡模式已开启：如果这次回复有重要信息、阶段性结论或需要用户注意的内容，请先执行 \`echocoding say\` 用一句话播报，再输出完整文字。"
     ;;
   verbose)
-    echo "<user-prompt-submit-hook>⚠️ 强语音模式：每个 turn 都必须 echocoding say，包括纯工具调用。绝对不能静默。</user-prompt-submit-hook>"
+    emit_reminder \
+      "<user-prompt-submit-hook>⚠️ 强语音模式：每个 turn 都必须 echocoding say，包括纯工具调用。绝对不能静默。</user-prompt-submit-hook>" \
+      "EchoCoding 强语音模式已开启：这个 turn 必须先执行 \`echocoding say\`，再输出文字；即使只是工具调用也不能静默。"
     ;;
   # minimal: no reminder needed
 esac

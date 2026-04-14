@@ -49,7 +49,8 @@ Run these commands via shell:
 
 - Codex runs in a sandboxed environment. Ensure `echocoding` is in PATH or use the full path.
 - This file is installed as a global Codex skill and is discovered from the Codex skills directory.
-- The daemon must be started before any say/ask/sfx commands will work.
+- When Codex hooks are installed, the daemon is usually auto-started when the session opens.
+- `echocoding start` is still safe and idempotent if you need to ensure the daemon is running.
 
 ---
 

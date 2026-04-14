@@ -139,7 +139,7 @@ program
 
     console.log();
     console.log('[echocoding] Installation complete!');
-    console.log('  In Claude Code: type /echocoding to start voice mode');
+    console.log('  In Claude Code / Codex: type /echocoding to start voice mode');
     console.log('  In Cursor/Windsurf: MCP tools available automatically');
     console.log('  Run `echocoding studio` to configure voices and preview sounds');
 
