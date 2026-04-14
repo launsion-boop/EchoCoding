@@ -11,6 +11,21 @@ export type AsrEngine = 'paraformer' | 'whisper';
 
 export type VoiceLevel = 'minimal' | 'balanced' | 'verbose';
 export type EchoClientId = 'default' | 'claude' | 'codex';
+type ScopedClientId = Exclude<EchoClientId, 'default'>;
+
+interface ClientModeOverrides {
+  enabled?: boolean;
+  volume?: number;
+  mode?: EchoConfig['mode'];
+  voiceLevel?: VoiceLevel;
+  ttsEnabled?: boolean;
+  sfxEnabled?: boolean;
+  sfxVolume?: number;
+}
+
+interface EchoConfigFile extends EchoConfig {
+  clients?: Partial<Record<ScopedClientId, ClientModeOverrides>>;
+}
 
 export interface EchoConfig {
   enabled: boolean;
@@ -137,21 +152,36 @@ export function ensureConfigDir(): void {
 }
 
 export function getConfig(): EchoConfig {
-  try {
-    if (fs.existsSync(CONFIG_FILE)) {
-      const raw = fs.readFileSync(CONFIG_FILE, 'utf-8');
-      const parsed = parseYaml(raw) as Partial<EchoConfig>;
-      return deepMerge(DEFAULT_CONFIG as unknown as Record<string, unknown>, parsed as unknown as Record<string, unknown>) as unknown as EchoConfig;
-    }
-  } catch {
-    // Fall through to default
-  }
-  return { ...DEFAULT_CONFIG };
+  const merged = loadMergedConfig();
+  const clientId = getRuntimeClientId();
+  const withOverrides = applyClientRuntimeOverrides(merged, clientId);
+  const { clients: _clients, ...effectiveConfig } = withOverrides;
+  return effectiveConfig;
 }
 
 export function saveConfig(config: EchoConfig): void {
   ensureConfigDir();
-  fs.writeFileSync(CONFIG_FILE, stringifyYaml(config), 'utf-8');
+  const clientId = getRuntimeClientId();
+  const baseline = loadMergedConfig();
+  const next = deepMerge(
+    baseline as unknown as Record<string, unknown>,
+    config as unknown as Record<string, unknown>,
+  ) as unknown as EchoConfigFile;
+
+  if (clientId !== 'default') {
+    resetGlobalRuntimeFields(next, baseline);
+    next.clients = {
+      ...(baseline.clients ?? {}),
+      ...(next.clients ?? {}),
+      [clientId]: {
+        ...(baseline.clients?.[clientId] ?? {}),
+        ...(next.clients?.[clientId] ?? {}),
+        ...captureClientRuntimeOverrides(config),
+      },
+    };
+  }
+
+  fs.writeFileSync(CONFIG_FILE, stringifyYaml(next), 'utf-8');
 }
 
 export function setConfigValue(keyPath: string, value: string): void {
@@ -274,6 +304,79 @@ function normalizeClientId(raw: string | undefined): EchoClientId {
   const value = (raw ?? '').trim().toLowerCase();
   if (value === 'claude' || value === 'codex') return value;
   return 'default';
+}
+
+function loadMergedConfig(): EchoConfigFile {
+  const parsed = loadConfigFile();
+  return deepMerge(
+    DEFAULT_CONFIG as unknown as Record<string, unknown>,
+    parsed as unknown as Record<string, unknown>,
+  ) as unknown as EchoConfigFile;
+}
+
+function loadConfigFile(): Partial<EchoConfigFile> {
+  try {
+    if (!fs.existsSync(CONFIG_FILE)) return {};
+    const raw = fs.readFileSync(CONFIG_FILE, 'utf-8');
+    const parsed = parseYaml(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return parsed as Partial<EchoConfigFile>;
+  } catch {
+    return {};
+  }
+}
+
+function applyClientRuntimeOverrides(config: EchoConfigFile, clientId: EchoClientId): EchoConfigFile {
+  if (clientId === 'default') return config;
+  const override = config.clients?.[clientId];
+  if (!override) return config;
+
+  const next: EchoConfigFile = { ...config };
+
+  if (override.enabled !== undefined) next.enabled = override.enabled;
+  if (override.volume !== undefined) next.volume = override.volume;
+  if (override.mode !== undefined) next.mode = override.mode;
+  if (override.voiceLevel !== undefined) next.voiceLevel = override.voiceLevel;
+  if (override.ttsEnabled !== undefined) {
+    next.tts = { ...next.tts, enabled: override.ttsEnabled };
+  }
+  if (override.sfxEnabled !== undefined || override.sfxVolume !== undefined) {
+    next.sfx = {
+      ...next.sfx,
+      ...(override.sfxEnabled !== undefined ? { enabled: override.sfxEnabled } : {}),
+      ...(override.sfxVolume !== undefined ? { volume: override.sfxVolume } : {}),
+    };
+  }
+
+  return next;
+}
+
+function resetGlobalRuntimeFields(next: EchoConfigFile, baseline: EchoConfigFile): void {
+  next.enabled = baseline.enabled;
+  next.volume = baseline.volume;
+  next.mode = baseline.mode;
+  next.voiceLevel = baseline.voiceLevel;
+  next.tts = {
+    ...next.tts,
+    enabled: baseline.tts.enabled,
+  };
+  next.sfx = {
+    ...next.sfx,
+    enabled: baseline.sfx.enabled,
+    volume: baseline.sfx.volume,
+  };
+}
+
+function captureClientRuntimeOverrides(config: EchoConfig): ClientModeOverrides {
+  return {
+    enabled: config.enabled,
+    volume: config.volume,
+    mode: config.mode,
+    voiceLevel: config.voiceLevel,
+    ttsEnabled: config.tts.enabled,
+    sfxEnabled: config.sfx.enabled,
+    sfxVolume: config.sfx.volume,
+  };
 }
 
 function appendClientSuffix(filePath: string, clientId: EchoClientId): string {
