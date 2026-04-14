@@ -64,49 +64,33 @@ const HOOK_CONFIG: Record<string, { async: boolean }> = {
   PreCompact: { async: true },
 };
 
-function upsertClaudeHookCommand(
+function upsertClaudeManagedGroup(
   hooks: Record<string, ClaudeHookMatcher[]>,
   eventName: string,
-  commandNeedle: string,
-  desiredEntry: ClaudeHookEntry,
+  managedCommandNeedles: string[],
+  desiredGroup: ClaudeHookMatcher,
 ): boolean {
   const groups = hooks[eventName] ?? [];
-  const normalized: ClaudeHookMatcher[] = [];
-  let inserted = false;
-  let changed = false;
+  const normalized: ClaudeHookMatcher[] = groups
+    .map((group) => {
+      const retainedHooks = group.hooks.filter(
+        (hook) => !managedCommandNeedles.some((needle) => hook.command.includes(needle)),
+      );
+      if (retainedHooks.length === 0) return null;
+      return {
+        ...group,
+        hooks: retainedHooks,
+      };
+    })
+    .filter((group): group is ClaudeHookMatcher => group !== null);
 
-  for (const group of groups) {
-    const retainedHooks = group.hooks.filter((hook) => !hook.command.includes(commandNeedle));
-    if (retainedHooks.length !== group.hooks.length) {
-      changed = true;
-      if (!inserted) {
-        normalized.push({
-          matcher: '',
-          hooks: [{ ...desiredEntry }],
-        });
-        inserted = true;
-      }
-      if (retainedHooks.length > 0) {
-        normalized.push({
-          ...group,
-          hooks: retainedHooks,
-        });
-      }
-      continue;
-    }
-    normalized.push(group);
-  }
-
-  if (!inserted) {
-    normalized.push({
-      matcher: '',
-      hooks: [{ ...desiredEntry }],
-    });
-    changed = true;
-  }
+  normalized.push({
+    matcher: desiredGroup.matcher ?? '',
+    hooks: desiredGroup.hooks.map((hook) => ({ ...hook })),
+  });
 
   hooks[eventName] = normalized;
-  return changed;
+  return JSON.stringify(groups) !== JSON.stringify(normalized);
 }
 
 function getHookCommand(): string {
@@ -183,37 +167,57 @@ export const claudeAdapter: ClientAdapter = {
     // Inject EchoCoding hooks (preserve unrelated hooks, upsert managed hooks)
     let injected = 0;
     for (const [eventName, config] of Object.entries(HOOK_CONFIG)) {
-      if (upsertClaudeHookCommand(settings.hooks, eventName, 'echocoding-hook', {
-        type: 'command',
-        command: getHookCommand(),
-        ...(config.async ? { async: true } : {}),
+      if (eventName === 'SessionStart' || eventName === 'UserPromptSubmit') continue;
+      if (upsertClaudeManagedGroup(settings.hooks, eventName, ['echocoding-hook'], {
+        matcher: '',
+        hooks: [
+          {
+            type: 'command',
+            command: getHookCommand(),
+            ...(config.async ? { async: true } : {}),
+          },
+        ],
       })) {
         injected++;
       }
     }
 
-    // Inject voice-reminder blocking hook for UserPromptSubmit
-    // This reminds the agent to call `echocoding say` in balanced/verbose modes
-    {
-      if (upsertClaudeHookCommand(settings.hooks, 'UserPromptSubmit', 'voice-reminder', {
-        type: 'command',
-        command: getVoiceReminderCommand(),
-        // blocking (no async) — stdout is injected as system message
-      })) {
-        injected++;
-      }
+    // SessionStart: keep auto-start + hook in one group.
+    if (upsertClaudeManagedGroup(settings.hooks, 'SessionStart', ['echocoding-hook', 'auto-start'], {
+      matcher: '',
+      hooks: [
+        {
+          type: 'command',
+          command: getAutoStartCommand(),
+          async: true, // non-blocking — daemon starts in background
+        },
+        {
+          type: 'command',
+          command: getHookCommand(),
+          async: true,
+        },
+      ],
+    })) {
+      injected++;
     }
 
-    // Inject auto-start hook for SessionStart
-    // Starts daemon automatically when Claude Code opens a new session
-    {
-      if (upsertClaudeHookCommand(settings.hooks, 'SessionStart', 'auto-start', {
-        type: 'command',
-        command: getAutoStartCommand(),
-        async: true, // non-blocking — daemon starts in background
-      })) {
-        injected++;
-      }
+    // UserPromptSubmit: keep reminder + hook in one group.
+    if (upsertClaudeManagedGroup(settings.hooks, 'UserPromptSubmit', ['echocoding-hook', 'voice-reminder'], {
+      matcher: '',
+      hooks: [
+        {
+          type: 'command',
+          command: getVoiceReminderCommand(),
+          // blocking (no async) — stdout is injected as system message
+        },
+        {
+          type: 'command',
+          command: getHookCommand(),
+          async: true,
+        },
+      ],
+    })) {
+      injected++;
     }
 
     // Backup + atomic write
