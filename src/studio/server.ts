@@ -386,6 +386,51 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     return;
   }
 
+  // API: Browser ASR — receive recorded audio from browser, send to cloud ASR
+  if (pathname === '/api/asr' && req.method === 'POST') {
+    const config = getConfig();
+    const endpoint = config.asr.cloud.endpoint;
+
+    if (!endpoint) {
+      jsonResponse(res, { error: 'Cloud ASR endpoint not configured' }, 503);
+      return;
+    }
+
+    try {
+      const rawBody = await readBody(req);
+      // Browser sends base64 WAV audio
+      const body = JSON.parse(rawBody) as { audio?: string; format?: string };
+
+      if (!body.audio) {
+        jsonResponse(res, { error: 'Missing audio data' }, 400);
+        return;
+      }
+
+      // Forward to cloud ASR proxy
+      const asrRes = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          audio: body.audio,
+          format: body.format || 'wav',
+          language: 'zh-CN',
+        }),
+      });
+
+      if (!asrRes.ok) {
+        jsonResponse(res, { error: `ASR error: ${asrRes.status}` }, 502);
+        return;
+      }
+
+      const result = await asrRes.json() as { text?: string; error?: string };
+      jsonResponse(res, result);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      jsonResponse(res, { error: `ASR failed: ${msg}` }, 500);
+    }
+    return;
+  }
+
   // 404
   res.writeHead(404);
   res.end('Not found');

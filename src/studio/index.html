@@ -336,6 +336,16 @@
     <div class="sfx-grid" id="sfxGrid"></div>
   </div>
 
+  <!-- Voice Input (ASR) -->
+  <div class="section">
+    <div class="section-title">Voice Input (ASR) <span class="badge">Cloud</span></div>
+    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <button class="btn-sm primary" id="micBtn" onclick="toggleMic()" style="padding:8px 20px;font-size:14px">Hold to Speak</button>
+      <span id="micStatus" style="color:var(--text-dim);font-size:13px">Click to start recording</span>
+    </div>
+    <div id="asrResult" style="margin-top:12px;padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);min-height:40px;font-size:14px;display:none"></div>
+  </div>
+
   <!-- Settings -->
   <div class="section">
     <div class="section-title">Settings</div>
@@ -753,6 +763,102 @@
     currentVoice = voiceId;
     renderCloudVoices();
     setLoading(false);
+  }
+
+  // --- Browser ASR (MediaRecorder) ---
+  let mediaRecorder = null;
+  let audioChunks = [];
+  let isRecording = false;
+
+  async function toggleMic() {
+    if (isRecording) {
+      stopRecording();
+    } else {
+      await startRecording();
+    }
+  }
+
+  async function startRecording() {
+    const btn = document.getElementById('micBtn');
+    const status = document.getElementById('micStatus');
+    const resultDiv = document.getElementById('asrResult');
+
+    try {
+      // Request microphone — browser will show permission dialog
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true }
+      });
+
+      audioChunks = [];
+      mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunks.push(e.data);
+      };
+
+      mediaRecorder.onstop = async () => {
+        // Stop all tracks
+        stream.getTracks().forEach(t => t.stop());
+
+        status.textContent = 'Recognizing...';
+        btn.textContent = 'Hold to Speak';
+        btn.style.background = '';
+        isRecording = false;
+
+        // Convert to base64 and send to ASR
+        const blob = new Blob(audioChunks, { type: 'audio/webm' });
+        const reader = new FileReader();
+        reader.onload = async () => {
+          const base64 = reader.result.split(',')[1];
+          try {
+            const res = await fetch('/api/asr', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ audio: base64, format: 'webm' }),
+            });
+            const data = await res.json();
+            resultDiv.style.display = 'block';
+            if (data.text) {
+              resultDiv.innerHTML = '<span style="color:var(--green)">Recognized:</span> ' + data.text;
+              status.textContent = 'Done. Click to record again.';
+            } else if (data.error) {
+              resultDiv.innerHTML = '<span style="color:var(--red)">Error:</span> ' + data.error;
+              status.textContent = 'Failed. Try again.';
+            } else {
+              resultDiv.innerHTML = '<span style="color:var(--text-dim)">[empty]</span>';
+              status.textContent = 'No speech detected. Try again.';
+            }
+          } catch (err) {
+            resultDiv.style.display = 'block';
+            resultDiv.innerHTML = '<span style="color:var(--red)">Error:</span> ' + err.message;
+            status.textContent = 'ASR unavailable.';
+          }
+        };
+        reader.readAsDataURL(blob);
+      };
+
+      mediaRecorder.start();
+      isRecording = true;
+      btn.textContent = 'Stop';
+      btn.style.background = 'var(--red)';
+      status.textContent = 'Recording... speak now';
+      resultDiv.style.display = 'none';
+
+      // Auto-stop after 8 seconds
+      setTimeout(() => {
+        if (isRecording) stopRecording();
+      }, 8000);
+
+    } catch (err) {
+      status.textContent = 'Microphone access denied. Please allow in browser settings.';
+      console.error('Mic error:', err);
+    }
+  }
+
+  function stopRecording() {
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+      mediaRecorder.stop();
+    }
   }
 
   // --- Boot ---

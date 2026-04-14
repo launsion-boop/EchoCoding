@@ -123,8 +123,24 @@ echocoding studio
 Opens a localhost web panel:
 - **Voice Browser** — preview 103 local + 14 cloud voices, filter by language/gender
 - **Local/Cloud toggle** — switch TTS provider and preview voices
+- **Voice Input (ASR)** — test speech recognition via browser microphone
 - **SFX Preview** — listen to all 22 sound effects
 - **Settings** — volume, speed, language, mode toggles
+
+### Microphone Access (Important for ASR)
+
+On macOS, voice input (`echocoding ask/listen`) requires microphone permission. Due to macOS security, CLI tools cannot trigger the permission dialog automatically.
+
+**Solution: Use Studio for first-time microphone setup.**
+
+1. Run `echocoding studio` to open the web panel
+2. Click "Hold to Speak" in the Voice Input section
+3. Your browser will show a microphone permission dialog — **click Allow**
+4. Voice input via Studio works immediately
+
+For CLI-based ASR (`echocoding listen/ask`), you also need to grant microphone access to your terminal app:
+- Open **System Settings > Privacy & Security > Microphone**
+- Enable your terminal app (Terminal.app / iTerm2) or Claude Code
 
 ## CLI Commands
 
