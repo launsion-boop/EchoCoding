@@ -123,6 +123,41 @@ export function playAudioFile(filePath: string, volume?: number): void {
   }
 }
 
+/**
+ * Play audio file and wait for playback to finish.
+ * Used by TTS to block until speech completes (text/voice sync).
+ */
+export function playAudioFileAsync(filePath: string, volume?: number): Promise<void> {
+  return new Promise((resolve) => {
+    const platform = os.platform();
+
+    if (platform === 'darwin') {
+      const args = [filePath];
+      if (volume !== undefined) {
+        args.push('-v', (volume / 100).toFixed(2));
+      }
+      const child = spawn('afplay', args, { stdio: 'ignore' });
+      child.on('close', () => resolve());
+      child.on('error', () => resolve());
+    } else if (platform === 'linux') {
+      const child = spawn('paplay', [filePath], { stdio: 'ignore' });
+      child.on('close', () => resolve());
+      child.on('error', () => {
+        const fallback = spawn('aplay', [filePath], { stdio: 'ignore' });
+        fallback.on('close', () => resolve());
+        fallback.on('error', () => resolve());
+      });
+    } else if (platform === 'win32') {
+      const psCmd = `(New-Object Media.SoundPlayer '${filePath}').PlaySync()`;
+      const child = spawn('powershell', ['-Command', psCmd], { stdio: 'ignore' });
+      child.on('close', () => resolve());
+      child.on('error', () => resolve());
+    } else {
+      resolve();
+    }
+  });
+}
+
 export function listAvailableSfx(): string[] {
   const soundsDir = getSoundsDir();
   const results: string[] = [];

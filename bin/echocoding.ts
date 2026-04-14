@@ -2,13 +2,14 @@
 
 import { Command } from 'commander';
 import { isDaemonRunning, stopDaemon } from '../src/daemon/server.js';
-import { sendSay, sendSfx, sendAsk, sendListen, pingDaemon } from '../src/daemon/client.js';
+import { sendSay, sendSfx, sendAsk, sendListen, sendWithResponse, pingDaemon } from '../src/daemon/client.js';
 import { installClaudeCode, uninstallClaudeCode, installCodex, uninstallCodex, detectInstalledAgents } from '../src/installer.js';
 import { getConfig, setConfigValue, getConfigValue, ensureConfigDir, saveConfig } from '../src/config.js';
 import { playSfx } from '../src/engines/sfx-engine.js';
 import { checkModels, downloadModels, hasEssentialModels } from '../src/downloader.js';
 import { checkSystemDeps, installMissingDeps } from '../src/deps.js';
 import { startStudio } from '../src/studio/server.js';
+import fs from 'node:fs';
 import { fork } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -90,6 +91,22 @@ program
       }
     } else {
       console.log('[echocoding] Using cloud TTS/ASR (default). Local models can be downloaded later via `echocoding studio`.');
+    }
+
+    // macOS: request microphone permission via mic-helper .app bundle
+    if (process.platform === 'darwin') {
+      const micHelper = path.join(path.dirname(__dirname), 'tools', 'mic-helper');
+      if (fs.existsSync(micHelper)) {
+        console.log();
+        console.log('[echocoding] Requesting microphone permission...');
+        try {
+          const { execFileSync } = await import('node:child_process');
+          execFileSync(micHelper, ['authorize'], { timeout: 30_000, encoding: 'utf-8' });
+          console.log('[echocoding] Microphone: authorized');
+        } catch {
+          console.log('[echocoding] Microphone: not authorized (you can grant later in System Settings)');
+        }
+      }
     }
 
     console.log();
@@ -191,13 +208,18 @@ program
 // --- say ---
 program
   .command('say <text>')
-  .description('Speak text via TTS')
+  .description('Speak text via TTS (blocks until playback finishes)')
   .action(async (text: string) => {
-    const sent = await sendSay(text);
-    if (!sent) {
+    try {
+      // Wait for TTS to finish so text and voice stay in sync
+      await sendWithResponse({ type: 'say', text }, 15_000);
+    } catch {
       console.error('[echocoding] Daemon not running. Run `echocoding start` first.');
       process.exit(1);
     }
+    // Output current voiceLevel so the AI can detect live changes from Studio
+    const level = getConfig().voiceLevel || 'balanced';
+    process.stdout.write(`[voiceLevel=${level}]\n`);
   });
 
 // --- ask ---
@@ -205,13 +227,17 @@ program
   .command('ask <question>')
   .description('Speak a question via TTS, then listen for voice answer (stdout: recognized text)')
   .action(async (question: string) => {
+    // TTS via daemon, then record + ASR in foreground (daemon can't access mic)
+    await sendSay(question);
+    await new Promise((r) => setTimeout(r, 1500));
     try {
-      const result = await sendAsk(question);
-      // Output result to stdout — this is how the model reads the user's answer
+      const { listen } = await import('../src/engines/asr-engine.js');
+      const result = await listen();
       process.stdout.write(result + '\n');
-    } catch {
-      console.error('[echocoding] Daemon not running. Run `echocoding start` first.');
-      process.exit(1);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[echocoding] ASR error: ${msg}\n`);
+      process.stdout.write('[error]\n');
     }
   });
 
@@ -220,12 +246,15 @@ program
   .command('listen')
   .description('Open microphone and listen for voice input (stdout: recognized text)')
   .action(async () => {
+    // Record + ASR in foreground (daemon's detached process can't access mic on macOS)
     try {
-      const result = await sendListen();
+      const { listen } = await import('../src/engines/asr-engine.js');
+      const result = await listen();
       process.stdout.write(result + '\n');
-    } catch {
-      console.error('[echocoding] Daemon not running. Run `echocoding start` first.');
-      process.exit(1);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[echocoding] ASR error: ${msg}\n`);
+      process.stdout.write('[error]\n');
     }
   });
 

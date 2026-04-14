@@ -1,12 +1,46 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { spawn, type ChildProcess } from 'node:child_process';
-import { getConfig } from '../config.js';
+import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
+import { getConfig, getPackageRoot } from '../config.js';
 import { playSfx } from './sfx-engine.js';
 import { signRequest } from '../auth.js';
 
 const TEMP_DIR = path.join(os.tmpdir(), 'echocoding-asr');
+
+// --- macOS mic-helper ---
+
+function getMicHelperPath(): string | null {
+  const candidates = [
+    path.join(getPackageRoot(), 'tools', 'mic-helper'),
+    path.join(getPackageRoot(), '..', 'tools', 'mic-helper'),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+let micAuthorized: boolean | null = null;
+
+function ensureMicAuthorized(): boolean {
+  if (micAuthorized === true) return true;
+  if (micAuthorized === false) return false;  // Already checked and failed — don't retry
+  const helper = getMicHelperPath();
+  if (!helper) { micAuthorized = false; return false; }
+
+  try {
+    // Quick check — never blocks
+    execFileSync(helper, ['check'], { stdio: 'ignore', timeout: 3_000 });
+    micAuthorized = true;
+    return true;
+  } catch {
+    // Not authorized — skip mic-helper, fall back to sox.
+    // Authorization should be triggered during `echocoding install`, not at recording time.
+    micAuthorized = false;
+    return false;
+  }
+}
 
 // Lazy-loaded sherpa-onnx-node (CJS module)
 import { createRequire } from 'node:module';
@@ -89,13 +123,59 @@ async function listenLocal(timeoutSec: number): Promise<string> {
 }
 
 /**
- * Record audio from system microphone using sox (rec) or arecord.
+ * Record audio using macOS mic-helper (AVFoundation).
+ * Returns path to WAV file, or null if failed.
+ */
+async function recordViaMicHelper(timeoutSec: number, outFile: string): Promise<string | null> {
+  const helper = getMicHelperPath();
+  if (!helper || !ensureMicAuthorized()) return null;
+
+  return new Promise((resolve) => {
+    const child = spawn(helper, ['record', String(timeoutSec), outFile], {
+      stdio: 'ignore',
+    });
+
+    child.on('close', (code) => {
+      if (code === 0 && fs.existsSync(outFile) && fs.statSync(outFile).size > 44) {
+        resolve(outFile);
+      } else {
+        resolve(null);
+      }
+    });
+
+    child.on('error', () => resolve(null));
+
+    // Safety net
+    setTimeout(() => {
+      try { child.kill('SIGTERM'); } catch { /* ignore */ }
+      setTimeout(() => {
+        if (fs.existsSync(outFile) && fs.statSync(outFile).size > 44) {
+          resolve(outFile);
+        } else {
+          resolve(null);
+        }
+      }, 200);
+    }, (timeoutSec + 2) * 1000);
+  });
+}
+
+/**
+ * Record audio from system microphone.
+ * macOS: tries mic-helper (AVFoundation) first, falls back to sox.
+ * Linux: uses sox (rec) or arecord.
  * Returns path to WAV file, or null if timeout with no audio.
  */
 async function recordMicrophone(timeoutSec: number): Promise<string | null> {
   fs.mkdirSync(TEMP_DIR, { recursive: true });
   const outFile = path.join(TEMP_DIR, `rec-${Date.now()}.wav`);
   const platform = os.platform();
+
+  // macOS: prefer mic-helper for proper permission handling
+  if (platform === 'darwin') {
+    const result = await recordViaMicHelper(timeoutSec, outFile);
+    if (result) return result;
+    // Fall through to sox if mic-helper unavailable
+  }
 
   return new Promise((resolve) => {
     let child: ChildProcess;
@@ -108,8 +188,6 @@ async function recordMicrophone(timeoutSec: number): Promise<string | null> {
     };
 
     if (platform === 'darwin' || platform === 'linux') {
-      // Use sox 'rec' if available, otherwise arecord
-      // rec outputs 16kHz mono WAV, stops after silence or timeout
       // Record fixed duration, output standard PCM 16-bit WAV
       // (sherpa-onnx requires subchunk1_size=16, i.e. plain PCM format)
       child = spawn('rec', [
@@ -133,7 +211,7 @@ async function recordMicrophone(timeoutSec: number): Promise<string | null> {
       });
 
       child.on('error', () => {
-        // sox not available, try arecord (Linux) or silence-based approach
+        // sox not available, try arecord (Linux)
         if (platform === 'linux') {
           const fallback = spawn('arecord', [
             '-f', 'S16_LE', '-r', '16000', '-c', '1',
@@ -163,7 +241,6 @@ async function recordMicrophone(timeoutSec: number): Promise<string | null> {
     setTimeout(() => {
       if (!resolved) {
         try { child?.kill('SIGTERM'); } catch { /* ignore */ }
-        // Give child a moment to write the file
         setTimeout(() => {
           if (fs.existsSync(outFile) && fs.statSync(outFile).size > 44) {
             done(outFile);

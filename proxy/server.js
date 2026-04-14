@@ -124,124 +124,55 @@ async function volcTts(text, voiceType, speed) {
   return result.data; // base64 audio
 }
 
-// --- Volcengine ASR via File Recognition API ---
-// Flow: save audio to temp file → serve via our proxy → submit URL to Volcengine → poll result
-
-const TEMP_DIR = '/tmp/echocoding-asr';
-try { fs.mkdirSync(TEMP_DIR, { recursive: true }); } catch {}
-
-// Temp file serving: /tmp/<id>.wav → accessible at https://coding.echoclaw.me/tmp/<id>.wav
-// Cleanup temp files after 60 seconds
+// --- Volcengine ASR via V2 direct upload API ---
+// Simpler than V3: send base64 audio inline, get result immediately (no callback URL, no polling).
 
 async function volcAsr(audioBase64, format, language) {
-  // Save audio to temp file with unique ID
-  const fileId = crypto.randomUUID();
-  const ext = format === 'webm' ? 'webm' : 'wav';
-  const tempPath = path.join(TEMP_DIR, `${fileId}.${ext}`);
-  const audioBuffer = Buffer.from(audioBase64, 'base64');
-  fs.writeFileSync(tempPath, audioBuffer);
+  const reqid = crypto.randomUUID();
 
-  // Public URL for Volcengine to fetch
-  const audioUrl = `https://coding.echoclaw.me/tmp/${fileId}.${ext}`;
+  const body = JSON.stringify({
+    app: {
+      appid: VOLC_APP_ID,
+      token: VOLC_ACCESS_TOKEN,
+      cluster: 'volcengine_streaming_common',
+    },
+    user: { uid: 'echocoding-proxy' },
+    audio: {
+      format: format === 'webm' ? 'ogg_opus' : format,
+      rate: 16000,
+      bits: 16,
+      channel: 1,
+      language: language || 'zh-CN',
+    },
+    request: {
+      reqid,
+      sequence: -1,
+      nbest: 1,
+      text: audioBase64,
+    },
+  });
 
-  try {
-    // V3 大模型录音文件识别 API
-    const taskId = crypto.randomUUID();
-    const submitHeaders = {
+  const response = await fetch('https://openspeech.bytedance.com/api/v2/asr', {
+    method: 'POST',
+    headers: {
       'Content-Type': 'application/json',
-      'X-Api-App-Key': VOLC_APP_ID,
-      'X-Api-Access-Key': VOLC_ACCESS_TOKEN,
-      'X-Api-Resource-Id': 'volc.bigasr.auc',
-      'X-Api-Request-Id': taskId,
-      'X-Api-Sequence': '-1',
-    };
+      'Authorization': `Bearer;${VOLC_ACCESS_TOKEN}`,
+    },
+    body,
+  });
 
-    // Submit recognition task
-    const submitRes = await fetch('https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit', {
-      method: 'POST',
-      headers: submitHeaders,
-      body: JSON.stringify({
-        user: { uid: 'echocoding-proxy' },
-        audio: { url: audioUrl, format: ext },
-        request: {
-          model_name: 'bigmodel',
-          enable_itn: true,
-          enable_punc: true,
-          show_utterances: true,
-        },
-      }),
-    });
-
-    if (!submitRes.ok) {
-      const errBody = await submitRes.text().catch(() => '');
-      throw new Error(`Submit failed: HTTP ${submitRes.status} ${errBody.slice(0, 300)}`);
-    }
-
-    const submitResult = await submitRes.json();
-    // Get logid from response header for query
-    const logId = submitRes.headers.get('x-tt-logid') || '';
-
-    if (submitResult.code && submitResult.code !== 20000000 && submitResult.code !== 20000001 && submitResult.code !== 20000002) {
-      throw new Error(`Submit failed: ${submitResult.message || JSON.stringify(submitResult).slice(0, 200)}`);
-    }
-
-    // Poll for result (max 30 seconds, 2s intervals)
-    const maxPolls = 15;
-    for (let i = 0; i < maxPolls; i++) {
-      await new Promise(r => setTimeout(r, 2000));
-
-      const queryHeaders = {
-        'Content-Type': 'application/json',
-        'X-Api-App-Key': VOLC_APP_ID,
-        'X-Api-Access-Key': VOLC_ACCESS_TOKEN,
-        'X-Api-Resource-Id': 'volc.bigasr.auc',
-        'X-Api-Request-Id': taskId,
-        'X-Api-Sequence': '-1',
-      };
-      if (logId) queryHeaders['X-Tt-Logid'] = logId;
-
-      const queryRes = await fetch('https://openspeech.bytedance.com/api/v3/auc/bigmodel/query', {
-        method: 'POST',
-        headers: queryHeaders,
-        body: '{}',
-      });
-
-      if (!queryRes.ok) continue;
-
-      const queryResult = await queryRes.json();
-      const code = queryResult.code;
-
-      // V3 API: result is directly in response when complete (no code field)
-      if (queryResult.result?.text) {
-        return queryResult.result.text.trim();
-      }
-
-      // Fallback: check utterances
-      if (queryResult.result?.utterances?.length > 0) {
-        const text = queryResult.result.utterances.map(u => u.text).join('');
-        if (text.trim()) return text.trim();
-      }
-
-      // Status codes for polling
-      if (code === 20000000) {
-        return queryResult.result?.text?.trim() || '[empty]';
-      } else if (code === 20000001 || code === 20000002) {
-        continue;
-      } else if (code !== undefined) {
-        throw new Error(`ASR query: ${queryResult.message || `code ${code}`}`);
-      }
-
-      // No code, no result yet — keep polling
-      continue;
-    }
-
-    throw new Error('ASR timeout: result not ready after 30 seconds');
-  } finally {
-    // Cleanup temp file after a delay (Volcengine needs time to fetch it)
-    setTimeout(() => {
-      try { fs.unlinkSync(tempPath); } catch {}
-    }, 60_000);
+  if (!response.ok) {
+    const errText = await response.text().catch(() => '');
+    throw new Error(`Volcengine ASR HTTP ${response.status}: ${errText.slice(0, 200)}`);
   }
+
+  const result = await response.json();
+
+  if (result.code !== 1000 || !result.result?.[0]?.text) {
+    throw new Error(`Volcengine ASR failed: ${result.message || `code ${result.code}`}`);
+  }
+
+  return result.result[0].text.trim();
 }
 
 // --- HTTP Server ---
@@ -373,24 +304,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // Serve temp audio files for Volcengine to fetch
-    if (url.startsWith('/tmp/') && req.method === 'GET') {
-      const fileName = url.replace('/tmp/', '').replace(/[^a-zA-Z0-9._-]/g, '');
-      const filePath = path.join(TEMP_DIR, fileName);
-      if (fs.existsSync(filePath)) {
-        const data = fs.readFileSync(filePath);
-        const ext = path.extname(fileName);
-        const mime = ext === '.webm' ? 'audio/webm' : ext === '.mp3' ? 'audio/mpeg' : 'audio/wav';
-        res.writeHead(200, { 'Content-Type': mime, 'Content-Length': data.length });
-        res.end(data);
-        return;
-      }
-    }
-
     sendJson(res, 404, { error: 'Not found. Endpoints: POST /v1/tts, POST /v1/asr, GET /health' });
   } catch (err) {
-    console.error(`[ERROR] ${ip} ${url}:`, err.message?.slice(0, 100));
-    sendJson(res, 500, { error: 'Internal server error' });
+    const msg = err.message?.slice(0, 200) || 'Unknown error';
+    console.error(`[ERROR] ${ip} ${url}:`, msg);
+    sendJson(res, 500, { error: msg });
   }
 });
 

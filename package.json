@@ -12,6 +12,7 @@
     "build": "tsc",
     "dev": "tsx bin/echocoding.ts",
     "clean": "rm -rf dist",
+    "postinstall": "bash scripts/build-mic-helper.sh 2>/dev/null || true",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -32,7 +33,9 @@
     "dist/",
     "sounds/",
     "skills/",
-    "src/studio/index.html"
+    "src/studio/index.html",
+    "tools/mic-helper.swift",
+    "scripts/build-mic-helper.sh"
   ],
   "repository": {
     "type": "git",

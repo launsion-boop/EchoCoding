@@ -26,31 +26,59 @@ Three verbosity tiers. Each tier defines when {{SAY_COMMAND}} fires.
 
 **Event priority (all tiers):**
 
-| Priority | Events |
-|----------|--------|
-| **P0 — Critical** | Blocked/need user input, risky/irreversible action, recovery after failure |
-| **P1 — Milestone** | Start of task, key finding, begin implementation, begin tests/build, completion (with info beyond chime), long-running op |
-| **P2 — Routine** | File reads, greps, small edits, routine commands, status already conveyed |
-| **P3 — Narration** | Explaining what you are about to do, commenting on results, thinking aloud |
+| Priority | Events | Example speech |
+|----------|--------|---------------|
+| **P0 — Critical** | Blocked/need user input, risky/irreversible action, recovery after failure | "需要你确认一下，要不要删除这个目录" |
+| **P1 — Milestone** | Start of task, key finding, begin implementation, begin tests/build, completion, long-running op | "开始跑测试了" / "全部通过，可以合并了" |
+| **P2 — Routine** | File reads, greps, small edits, routine commands, status already conveyed | "改好了配置文件" |
+| **P3 — Narration** | Explaining what you are about to do, commenting on results, thinking aloud | "先看看这个函数的实现" |
 
 **Tier rules:**
 
 | Tier | Speaks at | Silent at | Default? |
 |------|-----------|-----------|----------|
-| **minimal** | P0 + P1 only | P2, P3 | |
-| **balanced** | P0 + P1 + P2 (when there is new info) + every text-reply turn | P2 repeats, pure tool-only turns with no text | **Yes** |
-| **verbose** | Every turn, no exceptions | Never silent | |
+| **minimal** (简约) | P0 + P1 only | P2, P3 | |
+| **balanced** (平衡) | P0 + P1 + P2 (when new info) + every text-reply turn | P2 repeats, pure tool-only turns with no text | **Yes** |
+| **verbose** (强语音) | Every turn, no exceptions | Never silent | |
 
-**Balanced mode detail (default):**
-- Speak at the start of EVERY text reply to the user — if you are writing any visible text, lead with a spoken sentence summarizing it.
-- Speak when a tool result reveals something notable (error, unexpected output, key finding).
-- Stay silent only when issuing consecutive tool calls with no text output in between.
-- When in doubt, **speak**. The user chose voice mode to hear you.
+#### Minimal mode — speak only at critical gates
 
-**Verbose mode detail:**
-- Speak every single turn, including tool-only turns.
-- Narrate what you are about to do: "Reading the config", "Running tests now", "Editing the handler".
-- The user wants a full audio play-by-play — never stay silent.
+Speak **only** when the user truly needs to hear you: task kickoff, completion, errors, and decisions.
+
+| Scenario | Speak? | Why |
+|----------|--------|-----|
+| User gives a task | Yes (P1) | "好的，开始处理" |
+| Reading files / grepping | No | Routine tool call |
+| Found a key bug | Yes (P1) | "找到问题了，是个空指针" |
+| Need user decision | Yes (P0) | "两种方案，你选哪个" |
+| Task done | Yes (P1) | "搞定了，改了三个文件" |
+| Multiple edits in a row | No | Chimes cover these |
+
+#### Balanced mode — speak at every text reply (default)
+
+The rule is simple: **if you are writing visible text this turn, lead with a spoken summary.**
+
+| Scenario | Speak? | Why |
+|----------|--------|-----|
+| Text reply to user | **Yes** | Always — one sentence header |
+| Tool call → notable result (error, finding) | **Yes** | New information worth voicing |
+| Tool call → routine success | No | Chime covers it |
+| Consecutive tool calls, no text between them | No | Nothing to say yet |
+| User asks a question | **Yes** | Answering is always spoken |
+
+When in doubt, **speak**. The user chose voice mode to hear you.
+
+#### Verbose mode — narrate everything
+
+Every single turn gets a spoken line, including pure tool-call turns.
+
+| Scenario | Speak? | Example |
+|----------|--------|---------|
+| About to read a file | Yes | "先看一下配置文件" |
+| Running tests | Yes | "跑一下测试" |
+| Edit complete | Yes | "改完了，加了个空值检查" |
+| Tool errored | Yes | "报错了，缺少依赖" |
+| Thinking / planning | Yes | "让我想想最好的方案" |
 
 ### 3. Speech Throttle
 
@@ -157,7 +185,14 @@ If {{SAY_COMMAND}} fails or is unavailable:
 - Optionally note once: "Voice unavailable, continuing in text"
 - Do not retry or spam say attempts
 
-### 11. Emotion Tags
+### 11. Live voiceLevel Sync
+
+After each {{SAY_COMMAND}} call, check stdout for `[voiceLevel=X]`. If X differs from your current VOICE_LEVEL:
+- Update VOICE_LEVEL silently to X
+- Apply the new tier rules starting from the next turn
+- Do NOT announce the change — the user changed it intentionally in Studio
+
+### 12. Emotion Tags
 
 The TTS engine supports emotion tags embedded in speech text. Use them naturally to make the AI voice feel human:
 
@@ -179,7 +214,7 @@ Place tags inline where the emotion naturally occurs:
 - Skip tags entirely for neutral status updates ("Starting tests", "Done, 2 files changed")
 - When unsure, no tag is better than a wrong tag
 
-### 12. Safe Quoting
+### 13. Safe Quoting
 
 When calling {{SAY_COMMAND}}:
 - Use a single-line sentence

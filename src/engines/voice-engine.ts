@@ -4,7 +4,7 @@ import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { getConfig } from '../config.js';
 import { shouldThrottle, recordUsage } from '../throttle.js';
-import { playAudioFile } from './sfx-engine.js';
+import { playAudioFile, playAudioFileAsync } from './sfx-engine.js';
 import { signRequest } from '../auth.js';
 
 // Lazy-loaded sherpa-onnx-node (CJS module)
@@ -179,12 +179,12 @@ async function speakViaSherpa(text: string): Promise<void> {
   s.writeWave(tempFile, { samples: audio.samples, sampleRate: audio.sampleRate });
 
   const vol = Math.round((config.volume / 100) * 100);
-  playAudioFile(tempFile, vol);
+  await playAudioFileAsync(tempFile, vol);
 
   // Cleanup after playback
   setTimeout(() => {
     try { fs.unlinkSync(tempFile); } catch { /* ignore */ }
-  }, 30_000);
+  }, 5_000);
 }
 
 // --- Cloud TTS (Volcengine via proxy) ---
@@ -206,7 +206,7 @@ async function speakCloud(text: string): Promise<void> {
 
   fs.mkdirSync(TEMP_DIR, { recursive: true });
   const tempFile = path.join(TEMP_DIR, `tts-${Date.now()}.mp3`);
-  const cleanText = stripEmotionTags(text);
+  const { cleanText, emotion } = extractEmotion(text);
 
   // Detect if endpoint is Volcengine direct or our proxy
   const isVolcDirect = endpoint.includes('openspeech.bytedance.com');
@@ -215,19 +215,19 @@ async function speakCloud(text: string): Promise<void> {
 
   if (isVolcDirect) {
     // Direct Volcengine API call (user has own key)
-    audioBuffer = await callVolcengineTts(cleanText, config, apiKey);
+    audioBuffer = await callVolcengineTts(cleanText, config, apiKey, emotion);
   } else {
     // Our proxy (api.echoclaw.com) — simplified request, proxy adds key
-    audioBuffer = await callProxyTts(cleanText, config, endpoint);
+    audioBuffer = await callProxyTts(cleanText, config, endpoint, emotion);
   }
 
   fs.writeFileSync(tempFile, audioBuffer);
   const vol = Math.round((config.volume / 100) * 100);
-  playAudioFile(tempFile, vol);
+  await playAudioFileAsync(tempFile, vol);
 
   setTimeout(() => {
     try { fs.unlinkSync(tempFile); } catch { /* ignore */ }
-  }, 30_000);
+  }, 5_000);
 }
 
 /**
@@ -237,9 +237,23 @@ async function callVolcengineTts(
   text: string,
   config: ReturnType<typeof getConfig>,
   apiKey: string,
+  emotion?: string | null,
 ): Promise<Buffer> {
   const reqid = crypto.randomUUID();
   const voiceType = resolveVolcVoice(config.tts.voice, text);
+
+  const audioParams: Record<string, unknown> = {
+    voice_type: voiceType,
+    encoding: 'mp3',
+    speed_ratio: config.tts.speed,
+    volume_ratio: 1.0,
+    pitch_ratio: 1.0,
+  };
+
+  // Pass emotion for multi-emotion voices (those with _emo_ in voice_type)
+  if (emotion && voiceType.includes('_emo_')) {
+    audioParams.emotion = emotion;
+  }
 
   const body = JSON.stringify({
     app: {
@@ -248,13 +262,7 @@ async function callVolcengineTts(
       cluster: 'volcano_tts',
     },
     user: { uid: 'echocoding' },
-    audio: {
-      voice_type: voiceType,
-      encoding: 'mp3',
-      speed_ratio: config.tts.speed,
-      volume_ratio: 1.0,
-      pitch_ratio: 1.0,
-    },
+    audio: audioParams,
     request: {
       reqid,
       text,
@@ -294,14 +302,19 @@ async function callProxyTts(
   text: string,
   config: ReturnType<typeof getConfig>,
   endpoint: string,
+  emotion?: string | null,
 ): Promise<Buffer> {
   const voiceType = resolveVolcVoice(config.tts.voice, text);
-  const bodyStr = JSON.stringify({
+  const payload: Record<string, unknown> = {
     text,
     voice_type: voiceType,
     speed: config.tts.speed,
     encoding: 'mp3',
-  });
+  };
+  if (emotion) {
+    payload.emotion = emotion;
+  }
+  const bodyStr = JSON.stringify(payload);
   const authHeaders = signRequest(bodyStr, 'POST', '/v1/tts');
 
   const response = await fetch(endpoint, {
@@ -380,6 +393,28 @@ async function speakSystemFallback(text: string): Promise<void> {
 
 function stripEmotionTags(text: string): string {
   return text.replace(/<(laugh|chuckle|sigh|gasp|cough|yawn|groan|sniffle)>/gi, '').replace(/\s+/g, ' ').trim();
+}
+
+// --- Emotion extraction for cloud TTS ---
+
+const EMOTION_MAP: Record<string, string> = {
+  laugh: 'happy',
+  chuckle: 'happy',
+  sigh: 'sad',
+  groan: 'sad',
+  gasp: 'surprised',
+};
+
+/**
+ * Extract the first emotion tag from text and map it to a Volcengine emotion value.
+ * Returns the cleaned text and the mapped emotion (or null if no mapping).
+ */
+function extractEmotion(text: string): { cleanText: string; emotion: string | null } {
+  const match = text.match(/<(laugh|chuckle|sigh|gasp|cough|yawn|groan|sniffle)>/i);
+  const cleanText = stripEmotionTags(text);
+  if (!match) return { cleanText, emotion: null };
+  const tag = match[1].toLowerCase();
+  return { cleanText, emotion: EMOTION_MAP[tag] ?? null };
 }
 
 export function cleanupTempFiles(): void {

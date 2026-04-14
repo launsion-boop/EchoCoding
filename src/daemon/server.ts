@@ -143,7 +143,13 @@ function handleMessage(msg: DaemonMessage, conn?: net.Socket): void {
 
     case 'say': {
       if (msg.text) {
-        speak(msg.text).catch(() => { /* TTS failed, silently ignore */ });
+        speak(msg.text)
+          .then(() => {
+            try { conn?.write(JSON.stringify({ result: 'done' }) + '\n'); } catch { /* */ }
+          })
+          .catch(() => {
+            try { conn?.write(JSON.stringify({ result: 'done' }) + '\n'); } catch { /* */ }
+          });
       }
       break;
     }
