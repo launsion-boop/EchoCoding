@@ -2,19 +2,21 @@
 
 When user invokes this skill, follow this sequence:
 
+When running CLI commands from Claude Code, prefix every command with `ECHOCODING_CLIENT=claude` so this session uses the Claude-specific daemon instance.
+
 ## Step 0: Auto-Init (silent, once per session)
 
-1. Run `echocoding status` (suppress output).
+1. Run `ECHOCODING_CLIENT=claude echocoding status` (suppress output).
 2. If running → skip to Step 1.
-3. If not → run `echocoding start`. If that fails → `npx echocoding install --auto --start`. If both fail → report error and stop.
+3. If not → run `ECHOCODING_CLIENT=claude echocoding start`. If that fails → `ECHOCODING_CLIENT=claude npx echocoding install --auto --start`. If both fail → report error and stop.
 4. Never narrate init unless it fails.
 
 ## Step 1: Handle Arguments
 
-1. **Empty or "on":** Read `echocoding config get voiceLevel`, set VOICE_MODE=ON + saved level (default: balanced), confirm via `echocoding say "语音模式已开启，平衡模式"`. Follow all voice rules below.
-2. **"off":** Run `echocoding stop`, set VOICE_MODE=OFF, confirm in text: "Voice mode off."
-3. **"minimal"/"balanced"/"verbose":** Set VOICE_LEVEL, confirm via `echocoding say "已切换到{中文名}模式"`. If was OFF, start daemon + set ON.
-4. **Anything else:** Pass through as `echocoding $ARGUMENTS`.
+1. **Empty or "on":** Read `ECHOCODING_CLIENT=claude echocoding config get voiceLevel`, set VOICE_MODE=ON + saved level (default: balanced), confirm via `ECHOCODING_CLIENT=claude echocoding say "语音模式已开启，平衡模式"`. Follow all voice rules below.
+2. **"off":** Run `ECHOCODING_CLIENT=claude echocoding stop`, set VOICE_MODE=OFF, confirm in text: "Voice mode off."
+3. **"minimal"/"balanced"/"verbose":** Set VOICE_LEVEL, confirm via `ECHOCODING_CLIENT=claude echocoding say "已切换到{中文名}模式"`. If was OFF, start daemon + set ON.
+4. **Anything else:** Pass through as `ECHOCODING_CLIENT=claude echocoding $ARGUMENTS`.
 
 ---
 

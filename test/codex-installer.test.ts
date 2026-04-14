@@ -79,7 +79,7 @@ test('installCodex writes a Codex skill directory and migrates legacy instructio
   assert.equal(Array.isArray(hooks.hooks?.UserPromptSubmit), true);
   assert.match(
     hooks.hooks.SessionStart[0].hooks[0].command,
-    /auto-start\.sh/,
+    /ECHOCODING_CLIENT=codex .*auto-start\.sh/,
   );
   assert.equal(
     hooks.hooks.SessionStart[0].hooks[0].statusMessage,
@@ -87,7 +87,7 @@ test('installCodex writes a Codex skill directory and migrates legacy instructio
   );
   assert.match(
     hooks.hooks.UserPromptSubmit[0].hooks[0].command,
-    /ECHOCODING_HOOK_CLIENT=codex .*voice-reminder\.sh/,
+    /ECHOCODING_HOOK_CLIENT=codex ECHOCODING_CLIENT=codex .*voice-reminder\.sh/,
   );
 });
 

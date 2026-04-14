@@ -1,6 +1,6 @@
 import net from 'node:net';
 import fs from 'node:fs';
-import { getConfig, ensureConfigDir } from '../config.js';
+import { getConfig, ensureConfigDir, resolveDaemonPaths } from '../config.js';
 import { playSfx } from '../engines/sfx-engine.js';
 import { speak, cleanupTempFiles, disposeTts } from '../engines/voice-engine.js';
 import { listen, ask, disposeAsr } from '../engines/asr-engine.js';
@@ -43,7 +43,7 @@ export function stopAmbient(): void {
 
 export function startDaemon(): void {
   const config = getConfig();
-  const { socketPath, pidFile } = config.daemon;
+  const { socketPath, pidFile } = resolveDaemonPaths(config.daemon);
 
   ensureConfigDir();
 
@@ -124,7 +124,6 @@ export function startDaemon(): void {
 
   process.on('SIGTERM', cleanup);
   process.on('SIGINT', cleanup);
-  process.on('SIGHUP', cleanup);
 }
 
 function handleMessage(msg: DaemonMessage, conn?: net.Socket): void {
@@ -195,7 +194,7 @@ function handleMessage(msg: DaemonMessage, conn?: net.Socket): void {
 
 export function isDaemonRunning(): { running: boolean; pid?: number } {
   const config = getConfig();
-  const { pidFile, socketPath } = config.daemon;
+  const { pidFile, socketPath } = resolveDaemonPaths(config.daemon);
 
   if (!fs.existsSync(pidFile)) {
     return { running: false };

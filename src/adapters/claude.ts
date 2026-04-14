@@ -64,23 +64,68 @@ const HOOK_CONFIG: Record<string, { async: boolean }> = {
   PreCompact: { async: true },
 };
 
+function upsertClaudeHookCommand(
+  hooks: Record<string, ClaudeHookMatcher[]>,
+  eventName: string,
+  commandNeedle: string,
+  desiredEntry: ClaudeHookEntry,
+): boolean {
+  const groups = hooks[eventName] ?? [];
+  const normalized: ClaudeHookMatcher[] = [];
+  let inserted = false;
+  let changed = false;
+
+  for (const group of groups) {
+    const retainedHooks = group.hooks.filter((hook) => !hook.command.includes(commandNeedle));
+    if (retainedHooks.length !== group.hooks.length) {
+      changed = true;
+      if (!inserted) {
+        normalized.push({
+          matcher: '',
+          hooks: [{ ...desiredEntry }],
+        });
+        inserted = true;
+      }
+      if (retainedHooks.length > 0) {
+        normalized.push({
+          ...group,
+          hooks: retainedHooks,
+        });
+      }
+      continue;
+    }
+    normalized.push(group);
+  }
+
+  if (!inserted) {
+    normalized.push({
+      matcher: '',
+      hooks: [{ ...desiredEntry }],
+    });
+    changed = true;
+  }
+
+  hooks[eventName] = normalized;
+  return changed;
+}
+
 function getHookCommand(): string {
   const hookScript = path.join(getPackageRoot(), 'dist', 'bin', 'echocoding-hook.js');
   // Use absolute path to node — hook env may not have /opt/homebrew/bin in PATH
   const nodePath = process.execPath;
-  return `${nodePath} ${hookScript}`;
+  return `ECHOCODING_CLIENT=claude ${nodePath} ${hookScript}`;
 }
 
 function getVoiceReminderCommand(): string {
   const script = path.join(getPackageRoot(), 'scripts', 'voice-reminder.sh');
-  return `bash ${script}`;
+  return `ECHOCODING_HOOK_CLIENT=claude ECHOCODING_CLIENT=claude bash ${script}`;
 }
 
 function getAutoStartCommand(): string {
   const script = path.join(getPackageRoot(), 'scripts', 'auto-start.sh');
   const nodePath = process.execPath;
   // Pass Node path as env so auto-start.sh doesn't need to hunt for it
-  return `ECHOCODING_NODE=${nodePath} bash ${script}`;
+  return `ECHOCODING_CLIENT=claude ECHOCODING_NODE=${nodePath} bash ${script}`;
 }
 
 // --- Claude Code adapter ---
@@ -135,29 +180,14 @@ export const claudeAdapter: ClientAdapter = {
       settings.hooks = {};
     }
 
-    // Inject EchoCoding hooks (preserve existing hooks)
+    // Inject EchoCoding hooks (preserve unrelated hooks, upsert managed hooks)
     let injected = 0;
     for (const [eventName, config] of Object.entries(HOOK_CONFIG)) {
-      const existing = settings.hooks[eventName] ?? [];
-
-      // Check if EchoCoding hook already exists
-      const hasEchoCoding = existing.some((matcher) =>
-        matcher.hooks.some((h) => h.command.includes('echocoding-hook')),
-      );
-
-      if (!hasEchoCoding) {
-        const newEntry: ClaudeHookMatcher = {
-          matcher: '',
-          hooks: [
-            {
-              type: 'command',
-              command: getHookCommand(),
-              ...(config.async ? { async: true } : {}),
-            },
-          ],
-        };
-        existing.push(newEntry);
-        settings.hooks[eventName] = existing;
+      if (upsertClaudeHookCommand(settings.hooks, eventName, 'echocoding-hook', {
+        type: 'command',
+        command: getHookCommand(),
+        ...(config.async ? { async: true } : {}),
+      })) {
         injected++;
       }
     }
@@ -165,22 +195,11 @@ export const claudeAdapter: ClientAdapter = {
     // Inject voice-reminder blocking hook for UserPromptSubmit
     // This reminds the agent to call `echocoding say` in balanced/verbose modes
     {
-      const existing = settings.hooks['UserPromptSubmit'] ?? [];
-      const hasReminder = existing.some((matcher) =>
-        matcher.hooks.some((h) => h.command.includes('voice-reminder')),
-      );
-      if (!hasReminder) {
-        existing.push({
-          matcher: '',
-          hooks: [
-            {
-              type: 'command',
-              command: getVoiceReminderCommand(),
-              // blocking (no async) — stdout is injected as system message
-            },
-          ],
-        });
-        settings.hooks['UserPromptSubmit'] = existing;
+      if (upsertClaudeHookCommand(settings.hooks, 'UserPromptSubmit', 'voice-reminder', {
+        type: 'command',
+        command: getVoiceReminderCommand(),
+        // blocking (no async) — stdout is injected as system message
+      })) {
         injected++;
       }
     }
@@ -188,22 +207,11 @@ export const claudeAdapter: ClientAdapter = {
     // Inject auto-start hook for SessionStart
     // Starts daemon automatically when Claude Code opens a new session
     {
-      const existing = settings.hooks['SessionStart'] ?? [];
-      const hasAutoStart = existing.some((matcher) =>
-        matcher.hooks.some((h) => h.command.includes('auto-start')),
-      );
-      if (!hasAutoStart) {
-        existing.push({
-          matcher: '',
-          hooks: [
-            {
-              type: 'command',
-              command: getAutoStartCommand(),
-              async: true, // non-blocking — daemon starts in background
-            },
-          ],
-        });
-        settings.hooks['SessionStart'] = existing;
+      if (upsertClaudeHookCommand(settings.hooks, 'SessionStart', 'auto-start', {
+        type: 'command',
+        command: getAutoStartCommand(),
+        async: true, // non-blocking — daemon starts in background
+      })) {
         injected++;
       }
     }

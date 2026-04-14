@@ -10,6 +10,7 @@ export type AsrProvider = 'local' | 'cloud';
 export type AsrEngine = 'paraformer' | 'whisper';
 
 export type VoiceLevel = 'minimal' | 'balanced' | 'verbose';
+export type EchoClientId = 'default' | 'claude' | 'codex';
 
 export interface EchoConfig {
   enabled: boolean;
@@ -169,6 +170,40 @@ export function getSoundsDir(theme?: string): string {
   return path.join(getPackageRoot(), 'sounds', t);
 }
 
+export function getRuntimeClientId(env: NodeJS.ProcessEnv = process.env): EchoClientId {
+  const explicitRaw = env.ECHOCODING_CLIENT ?? env.ECHOCODING_HOOK_CLIENT;
+  if (explicitRaw !== undefined) {
+    return normalizeClientId(explicitRaw);
+  }
+
+  // Codex Desktop/CLI environment markers.
+  if (env.CODEX_THREAD_ID || env.CODEX_CI || env.CODEX_SHELL || env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE) {
+    return 'codex';
+  }
+
+  // Claude Code environment markers.
+  if (env.CLAUDECODE || env.CLAUDE_CODE || env.CLAUDE_CODE_SESSION || env.CLAUDE_SESSION_ID) {
+    return 'claude';
+  }
+
+  return 'default';
+}
+
+export function resolveDaemonPaths(
+  daemon: EchoConfig['daemon'],
+  clientId: EchoClientId = getRuntimeClientId(),
+): EchoConfig['daemon'] {
+  if (clientId === 'default') {
+    return { ...daemon };
+  }
+
+  return {
+    socketPath: appendClientSuffix(daemon.socketPath, clientId),
+    logFile: appendClientSuffix(daemon.logFile, clientId),
+    pidFile: appendClientSuffix(daemon.pidFile, clientId),
+  };
+}
+
 export function getPackageRoot(): string {
   // Walk up from this file to find package.json
   // Use fileURLToPath for correct Windows path handling
@@ -233,4 +268,23 @@ function parseValue(value: string): unknown {
   const num = Number(value);
   if (!isNaN(num) && value.trim() !== '') return num;
   return value;
+}
+
+function normalizeClientId(raw: string | undefined): EchoClientId {
+  const value = (raw ?? '').trim().toLowerCase();
+  if (value === 'claude' || value === 'codex') return value;
+  return 'default';
+}
+
+function appendClientSuffix(filePath: string, clientId: EchoClientId): string {
+  const parsed = path.parse(filePath);
+  const marker = `.${clientId}`;
+
+  if (parsed.ext) {
+    if (parsed.name.endsWith(marker)) return filePath;
+    return path.join(parsed.dir, `${parsed.name}${marker}${parsed.ext}`);
+  }
+
+  if (parsed.base.endsWith(marker)) return filePath;
+  return path.join(parsed.dir, `${parsed.base}${marker}`);
 }
