@@ -17,7 +17,8 @@ Before anything else, check if EchoCoding is ready:
 ## Step 1: Handle Arguments
 
 1. If `$ARGUMENTS` is empty or "on":
-   - Set VOICE_MODE=ON, VOICE_LEVEL=balanced for this session
+   - Run `echocoding config get voiceLevel` to read saved voice level preference
+   - Set VOICE_MODE=ON, VOICE_LEVEL to the saved value (default: balanced)
    - Confirm with spoken sentence: `echocoding say "语音模式已开启，平衡模式"`
    - From this point, follow ALL voice mode rules below for the rest of the session
 

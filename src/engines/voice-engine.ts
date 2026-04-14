@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { getConfig } from '../config.js';
 import { shouldThrottle, recordUsage } from '../throttle.js';
 import { playAudioFile } from './sfx-engine.js';
+import { signRequest } from '../auth.js';
 
 // Lazy-loaded sherpa-onnx-node (CJS module)
 import { createRequire } from 'node:module';
@@ -295,16 +296,18 @@ async function callProxyTts(
   endpoint: string,
 ): Promise<Buffer> {
   const voiceType = resolveVolcVoice(config.tts.voice, text);
+  const bodyStr = JSON.stringify({
+    text,
+    voice_type: voiceType,
+    speed: config.tts.speed,
+    encoding: 'mp3',
+  });
+  const authHeaders = signRequest(bodyStr, 'POST', '/v1/tts');
 
   const response = await fetch(endpoint, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      text,
-      voice_type: voiceType,
-      speed: config.tts.speed,
-      encoding: 'mp3',
-    }),
+    headers: { 'Content-Type': 'application/json', ...authHeaders },
+    body: bodyStr,
   });
 
   if (!response.ok) {

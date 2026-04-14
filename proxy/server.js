@@ -22,6 +22,19 @@ import crypto from 'node:crypto';
 // --- Config from env ---
 const VOLC_APP_ID = process.env.VOLC_APP_ID || '';
 const VOLC_ACCESS_TOKEN = process.env.VOLC_ACCESS_TOKEN || '';
+const SIGNING_KEY = process.env.EC_HMAC_SECRET || 'ec-managed-v1-7a3f2b1d5e8c490f6d2a1b3e7c9f4d8a';
+
+function verifyHmac(method, urlPath, timestamp, signature, body) {
+  if (!timestamp || !signature) return false;
+  const ts = parseInt(timestamp, 10);
+  const now = Math.floor(Date.now() / 1000);
+  if (isNaN(ts) || Math.abs(now - ts) > 120) return false; // 2 minute window
+  const bodyHash = crypto.createHash('sha256').update(body).digest('hex');
+  const payload = `${method}:${urlPath}:${timestamp}:${bodyHash}`;
+  const expected = crypto.createHmac('sha256', SIGNING_KEY).update(payload).digest('hex');
+  try { return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected)); }
+  catch { return false; }
+}
 const PORT = parseInt(process.env.PORT || '3456', 10);
 const RATE_LIMIT_PER_MIN = parseInt(process.env.RATE_LIMIT_PER_MIN || '30', 10);
 
@@ -284,9 +297,22 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
+    // Auth check for TTS/ASR endpoints
+    if ((url === '/v1/tts' || url === '/v1/asr') && req.method === 'POST') {
+      const rawBody = await readBody(req);
+      const ts = req.headers['x-ec-timestamp'];
+      const sig = req.headers['x-ec-signature'];
+      if (!verifyHmac(req.method, url, ts, sig, rawBody)) {
+        sendJson(res, 401, { error: 'Unauthorized: invalid or missing signature' });
+        return;
+      }
+      // Parse after auth
+      req._parsedBody = JSON.parse(rawBody);
+    }
+
     // TTS endpoint
     if (url === '/v1/tts' && req.method === 'POST') {
-      const body = JSON.parse(await readBody(req));
+      const body = req._parsedBody;
 
       // Strict parameter whitelist
       const text = typeof body.text === 'string' ? body.text : '';
@@ -323,7 +349,7 @@ const server = http.createServer(async (req, res) => {
 
     // ASR endpoint
     if (url === '/v1/asr' && req.method === 'POST') {
-      const body = JSON.parse(await readBody(req));
+      const body = req._parsedBody;
 
       const audio = typeof body.audio === 'string' ? body.audio : '';
       const format = typeof body.format === 'string' && ['wav', 'mp3', 'ogg'].includes(body.format) ? body.format : 'wav';

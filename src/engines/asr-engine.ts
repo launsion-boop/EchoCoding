@@ -4,6 +4,7 @@ import os from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { getConfig } from '../config.js';
 import { playSfx } from './sfx-engine.js';
+import { signRequest } from '../auth.js';
 
 const TEMP_DIR = path.join(os.tmpdir(), 'echocoding-asr');
 
@@ -330,14 +331,17 @@ async function callVolcengineAsr(
  * Proxy holds the Volcengine key — client sends base64 audio.
  */
 async function callProxyAsr(audioBase64: string, endpoint: string): Promise<string> {
+  const bodyStr = JSON.stringify({
+    audio: audioBase64,
+    format: 'wav',
+    language: 'zh-CN',
+  });
+  const authHeaders = signRequest(bodyStr, 'POST', '/v1/asr');
+
   const response = await fetch(endpoint, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      audio: audioBase64,
-      format: 'wav',
-      language: 'zh-CN',
-    }),
+    headers: { 'Content-Type': 'application/json', ...authHeaders },
+    body: bodyStr,
   });
 
   if (!response.ok) {

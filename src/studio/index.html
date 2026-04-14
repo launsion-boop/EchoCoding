@@ -349,7 +349,8 @@
   <!-- Settings -->
   <div class="section">
     <div class="section-title">Settings</div>
-    <div class="settings-grid" id="settingsGrid"></div>
+    <div class="settings-grid" id="settingsGeneral"></div>
+    <div id="settingsProviderSection"></div>
   </div>
 </div>
 
@@ -573,8 +574,12 @@
 
   // --- Settings rendering ---
   function renderSettings() {
-    const grid = document.getElementById('settingsGrid');
-    grid.innerHTML = `
+    const provider = config.tts?.provider || 'local';
+    const voiceLevel = config.voiceLevel || 'balanced';
+    const localVoice = config.tts?.voice || 'default';
+
+    // General settings (always visible)
+    document.getElementById('settingsGeneral').innerHTML = `
       <div class="setting-item">
         <label>Volume</label>
         <div class="slider-row">
@@ -583,26 +588,19 @@
         </div>
       </div>
       <div class="setting-item">
-        <label>Speed</label>
-        <div class="slider-row">
-          <input type="range" min="50" max="200" value="${(config.tts?.speed || 1.0) * 100}" oninput="updateSetting('tts.speed', this.value / 100); this.nextElementSibling.textContent = (this.value / 100).toFixed(1)">
-          <span class="slider-val">${(config.tts?.speed || 1.0).toFixed(1)}</span>
-        </div>
-      </div>
-      <div class="setting-item">
-        <label>Language</label>
-        <select onchange="updateSetting('tts.language', this.value)">
-          <option value="auto" ${config.tts?.language === 'auto' ? 'selected' : ''}>Auto</option>
-          <option value="zh" ${config.tts?.language === 'zh' ? 'selected' : ''}>Chinese</option>
-          <option value="en" ${config.tts?.language === 'en' ? 'selected' : ''}>English</option>
-        </select>
-      </div>
-      <div class="setting-item">
-        <label>Mode</label>
+        <label>Audio Mode</label>
         <select onchange="updateSetting('mode', this.value)">
           ${['full', 'sfx-only', 'voice-only', 'focus', 'mute'].map(m =>
             `<option value="${m}" ${config.mode === m ? 'selected' : ''}>${m}</option>`
           ).join('')}
+        </select>
+      </div>
+      <div class="setting-item">
+        <label>Voice Level</label>
+        <select onchange="updateSetting('voiceLevel', this.value)">
+          <option value="minimal" ${voiceLevel === 'minimal' ? 'selected' : ''}>Minimal (only critical moments)</option>
+          <option value="balanced" ${voiceLevel === 'balanced' ? 'selected' : ''}>Balanced (most turns)</option>
+          <option value="verbose" ${voiceLevel === 'verbose' ? 'selected' : ''}>Verbose (every action)</option>
         </select>
       </div>
       <div class="setting-item">
@@ -618,6 +616,83 @@
         </div>
       </div>
     `;
+
+    // Provider-specific settings — follows the Voice Browser tab
+    const section = document.getElementById('settingsProviderSection');
+
+    if (currentProvider === 'cloud') {
+      section.innerHTML = `
+        <div style="font-size:13px;color:var(--accent);margin:16px 0 12px;border-top:1px solid var(--border);padding-top:12px">Cloud (Volcengine)</div>
+        <div class="settings-grid">
+          <div class="setting-item">
+            <label>TTS Endpoint</label>
+            <input type="text" value="${config.tts?.cloud?.endpoint || ''}" readonly
+              style="width:100%;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:6px 8px;color:var(--text-dim);font-size:12px">
+          </div>
+          <div class="setting-item">
+            <label>Current Voice</label>
+            <div style="font-size:13px;color:var(--text)">${config.tts?.voice?.includes('_') ? config.tts.voice.split('_').slice(2).map(s => s[0]?.toUpperCase() + s.slice(1)).join(' ').replace(/ Moon Bigtts/i, '') : 'Default'}</div>
+          </div>
+          <div class="setting-item">
+            <label>Speed</label>
+            <div class="slider-row">
+              <input type="range" min="50" max="200" value="${(config.tts?.speed || 1.0) * 100}" oninput="updateSetting('tts.speed', this.value / 100); this.nextElementSibling.textContent = (this.value / 100).toFixed(1)">
+              <span class="slider-val">${(config.tts?.speed || 1.0).toFixed(1)}</span>
+            </div>
+          </div>
+          <div class="setting-item">
+            <label>ASR Provider</label>
+            <select onchange="updateSetting('asr.provider', this.value)">
+              <option value="local" ${config.asr?.provider === 'local' ? 'selected' : ''}>Local (Paraformer)</option>
+              <option value="cloud" ${config.asr?.provider === 'cloud' ? 'selected' : ''}>Cloud (Volcengine)</option>
+            </select>
+          </div>
+        </div>
+      `;
+    } else {
+      const modelsReady = config._modelsReady;
+      section.innerHTML = `
+        <div style="font-size:13px;color:var(--green);margin:16px 0 12px;border-top:1px solid var(--border);padding-top:12px">Local (Kokoro)</div>
+        <div id="modelDownloadBar" style="margin-bottom:12px;padding:10px 14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);display:flex;align-items:center;justify-content:space-between">
+          <span id="modelStatusText" style="font-size:13px;color:var(--text-dim)">Checking models...</span>
+          <button class="btn-sm primary" id="downloadBtn" onclick="downloadLocalModels()" style="display:none">Download Models (~1GB)</button>
+        </div>
+        <div class="settings-grid">
+          <div class="setting-item">
+            <label>Engine</label>
+            <select onchange="updateSetting('tts.engine', this.value)">
+              ${['kokoro', 'orpheus', 'system'].map(e =>
+                `<option value="${e}" ${config.tts?.engine === e ? 'selected' : ''}>${e}</option>`
+              ).join('')}
+            </select>
+          </div>
+          <div class="setting-item">
+            <label>Speaker ID</label>
+            <div style="display:flex;gap:8px;align-items:center">
+              <input type="number" min="0" max="102" value="${/^\d+$/.test(localVoice) ? localVoice : '30'}"
+                style="width:70px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:6px 8px;color:var(--text);font-size:13px"
+                onchange="updateSetting('tts.voice', this.value)">
+              <span style="font-size:12px;color:var(--text-dim)">0-102</span>
+            </div>
+          </div>
+          <div class="setting-item">
+            <label>Speed</label>
+            <div class="slider-row">
+              <input type="range" min="50" max="200" value="${(config.tts?.speed || 1.0) * 100}" oninput="updateSetting('tts.speed', this.value / 100); this.nextElementSibling.textContent = (this.value / 100).toFixed(1)">
+              <span class="slider-val">${(config.tts?.speed || 1.0).toFixed(1)}</span>
+            </div>
+          </div>
+          <div class="setting-item">
+            <label>Language</label>
+            <select onchange="updateSetting('tts.language', this.value)">
+              <option value="auto" ${config.tts?.language === 'auto' ? 'selected' : ''}>Auto Detect</option>
+              <option value="zh" ${config.tts?.language === 'zh' ? 'selected' : ''}>Chinese</option>
+              <option value="en" ${config.tts?.language === 'en' ? 'selected' : ''}>English</option>
+            </select>
+          </div>
+        </div>
+      `;
+    }
   }
 
   async function updateSetting(key, value) {
@@ -650,6 +725,8 @@
       document.getElementById('localVoiceSection').style.display = '';
       document.getElementById('cloudVoiceSection').style.display = 'none';
       document.getElementById('voiceCount').textContent = `${speakers.length} voices`;
+      // Check local models when switching to local tab
+      setTimeout(checkLocalModels, 100);
     } else {
       document.getElementById('localVoiceSection').style.display = 'none';
       document.getElementById('cloudVoiceSection').style.display = '';
@@ -657,6 +734,9 @@
       document.getElementById('voiceCount').textContent = `${cloudVoices.length} voices`;
       renderCloudVoices();
     }
+
+    // Re-render settings to match provider tab
+    renderSettings();
 
     // Save provider preference
     await api('/api/provider', {
@@ -763,6 +843,55 @@
     currentVoice = voiceId;
     renderCloudVoices();
     setLoading(false);
+  }
+
+  // --- Local Model Management ---
+  async function checkLocalModels() {
+    try {
+      const data = await api('/api/models');
+      const statusEl = document.getElementById('modelStatusText');
+      const btnEl = document.getElementById('downloadBtn');
+      if (!statusEl || !btnEl) return;
+
+      const installed = data.models.filter(m => m.installed).length;
+      const total = data.models.length;
+
+      if (data.hasAll) {
+        statusEl.innerHTML = `<span style="color:var(--green)">Models ready (${installed}/${total})</span>`;
+        btnEl.style.display = 'none';
+      } else {
+        statusEl.innerHTML = `<span style="color:var(--orange)">Models: ${installed}/${total} installed</span>`;
+        btnEl.style.display = '';
+      }
+    } catch {}
+  }
+
+  async function downloadLocalModels() {
+    const btnEl = document.getElementById('downloadBtn');
+    const statusEl = document.getElementById('modelStatusText');
+    if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'Downloading...'; }
+    if (statusEl) statusEl.innerHTML = '<span style="color:var(--accent)">Downloading models (~1GB), this may take a few minutes...</span>';
+
+    try {
+      await api('/api/models/download', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+
+      // Poll until done
+      const poll = setInterval(async () => {
+        const data = await api('/api/models');
+        const installed = data.models.filter(m => m.installed).length;
+        const total = data.models.length;
+        if (statusEl) statusEl.innerHTML = `<span style="color:var(--accent)">Downloading... (${installed}/${total})</span>`;
+
+        if (data.hasAll) {
+          clearInterval(poll);
+          if (statusEl) statusEl.innerHTML = `<span style="color:var(--green)">All models ready!</span>`;
+          if (btnEl) { btnEl.style.display = 'none'; }
+        }
+      }, 5000);
+    } catch (err) {
+      if (statusEl) statusEl.innerHTML = `<span style="color:var(--red)">Download failed</span>`;
+      if (btnEl) { btnEl.disabled = false; btnEl.textContent = 'Retry Download'; }
+    }
   }
 
   // --- Browser ASR (MediaRecorder) ---

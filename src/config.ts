@@ -9,11 +9,14 @@ export type TtsEngine = 'orpheus' | 'kokoro' | 'system';
 export type AsrProvider = 'local' | 'cloud';
 export type AsrEngine = 'paraformer' | 'whisper';
 
+export type VoiceLevel = 'minimal' | 'balanced' | 'verbose';
+
 export interface EchoConfig {
   enabled: boolean;
   theme: string;
   volume: number;
   mode: 'full' | 'sfx-only' | 'voice-only' | 'focus' | 'mute';
+  voiceLevel: VoiceLevel;
   tts: {
     enabled: boolean;
     provider: TtsProvider;
@@ -73,10 +76,11 @@ const DEFAULT_CONFIG: EchoConfig = {
   theme: 'default',
   volume: 70,
   mode: 'full',
+  voiceLevel: 'balanced',
   tts: {
     enabled: true,
-    provider: 'local',
-    engine: 'orpheus',
+    provider: 'cloud',
+    engine: 'kokoro',
     local: {
       modelsDir: path.join(CONFIG_DIR, 'models'),
       orpheusModel: '150m',
@@ -99,7 +103,7 @@ const DEFAULT_CONFIG: EchoConfig = {
   },
   asr: {
     enabled: true,
-    provider: 'local',
+    provider: 'cloud',
     engine: 'paraformer',
     local: {
       modelsDir: path.join(CONFIG_DIR, 'models'),

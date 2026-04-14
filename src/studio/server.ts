@@ -10,8 +10,9 @@ import { exec } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { getConfig, saveConfig, setConfigValue, getConfigValue } from '../config.js';
 import { isDaemonRunning } from '../daemon/server.js';
-import { checkModels } from '../downloader.js';
+import { checkModels, downloadModels, hasEssentialModels } from '../downloader.js';
 import { getSoundsDir, getPackageRoot } from '../config.js';
+import { signRequest } from '../auth.js';
 import { createRequire } from 'node:module';
 
 const _require = createRequire(import.meta.url);
@@ -327,10 +328,12 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     const endpoint = config.tts.cloud.endpoint;
 
     try {
+      const ttsBody = JSON.stringify({ text, voice_type: voiceType, speed, encoding: 'mp3' });
+      const ttsAuth = signRequest(ttsBody, 'POST', '/v1/tts');
       const proxyRes = await fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, voice_type: voiceType, speed, encoding: 'mp3' }),
+        headers: { 'Content-Type': 'application/json', ...ttsAuth },
+        body: ttsBody,
       });
 
       if (!proxyRes.ok) {
@@ -386,6 +389,34 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     return;
   }
 
+  // API: Local model status + download
+  if (pathname === '/api/models' && req.method === 'GET') {
+    const models = checkModels();
+    const hasAll = hasEssentialModels();
+    jsonResponse(res, { models, hasAll });
+    return;
+  }
+
+  if (pathname === '/api/models/download' && req.method === 'POST') {
+    // Start download in background, return immediately
+    const models = checkModels();
+    const missing = models.filter((m) => !m.installed);
+    if (missing.length === 0) {
+      jsonResponse(res, { ok: true, message: 'All models already installed' });
+      return;
+    }
+
+    // Run download async — client can poll /api/models for progress
+    downloadModels().then(() => {
+      console.log('[echocoding] Local models download complete');
+    }).catch((err) => {
+      console.error('[echocoding] Model download failed:', err);
+    });
+
+    jsonResponse(res, { ok: true, message: `Downloading ${missing.length} model(s) in background...` });
+    return;
+  }
+
   // API: Browser ASR — receive recorded audio from browser, send to cloud ASR
   if (pathname === '/api/asr' && req.method === 'POST') {
     const config = getConfig();
@@ -407,14 +438,16 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       }
 
       // Forward to cloud ASR proxy
+      const asrBody = JSON.stringify({
+        audio: body.audio,
+        format: body.format || 'wav',
+        language: 'zh-CN',
+      });
+      const asrAuth = signRequest(asrBody, 'POST', '/v1/asr');
       const asrRes = await fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          audio: body.audio,
-          format: body.format || 'wav',
-          language: 'zh-CN',
-        }),
+        headers: { 'Content-Type': 'application/json', ...asrAuth },
+        body: asrBody,
       });
 
       if (!asrRes.ok) {

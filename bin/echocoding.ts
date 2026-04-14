@@ -28,7 +28,8 @@ program
   .command('install')
   .description('Install EchoCoding hooks into your coding agent')
   .option('--claude-code', 'Install for Claude Code only')
-  .option('--skip-models', 'Skip model download')
+  .option('--local-models', 'Download local TTS/ASR models (~1GB)')
+  .option('--skip-models', 'Skip model download (deprecated, cloud is default)')
   .action(async (opts) => {
     const agents = detectInstalledAgents();
 
@@ -76,24 +77,26 @@ program
 
     ensureConfigDir();
 
-    // Auto-download models if missing
-    if (!opts.skipModels && !hasEssentialModels()) {
-      console.log();
-      console.log('[echocoding] Models not found. Downloading required models...');
-      console.log('  (use --skip-models to skip this step)');
-      console.log();
-      await downloadModels();
-    } else if (!opts.skipModels) {
-      const statuses = checkModels();
-      const installed = statuses.filter((s) => s.installed).length;
-      console.log(`[echocoding] Models: ${installed}/${statuses.length} installed`);
+    // Cloud is default — local models are optional, downloaded via Studio or CLI
+    if (opts.localModels) {
+      if (!hasEssentialModels()) {
+        console.log();
+        console.log('[echocoding] Downloading local models (~1GB)...');
+        await downloadModels();
+      } else {
+        const statuses = checkModels();
+        const installed = statuses.filter((s) => s.installed).length;
+        console.log(`[echocoding] Local models: ${installed}/${statuses.length} installed`);
+      }
+    } else {
+      console.log('[echocoding] Using cloud TTS/ASR (default). Local models can be downloaded later via `echocoding studio`.');
     }
 
     console.log();
     console.log('[echocoding] Installation complete!');
     console.log('  In Claude Code: type /echocoding to start voice mode');
-    console.log('  In Codex CLI: say "echocoding on" or "/echocoding" to start');
-    console.log('  Run `echocoding studio` to preview and configure voices');
+    console.log('  In Cursor/Windsurf: MCP tools available automatically');
+    console.log('  Run `echocoding studio` to configure voices and download local models');
   });
 
 // --- uninstall ---
