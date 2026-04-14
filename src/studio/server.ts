@@ -79,6 +79,78 @@ interface SpeakerInfo {
   recommended?: boolean;
 }
 
+interface CloudVoiceInfo {
+  id: string;
+  label: string;
+  lang: 'zh' | 'en';
+  gender: 'female' | 'male';
+  recommended?: boolean;
+}
+
+const STUDIO_CLOUD_VOICES: CloudVoiceInfo[] = [
+  // Legacy BigTTS voices commonly used in EchoCoding configs.
+  { id: 'zh_female_wanwanxiaohe_moon_bigtts', label: '湾湾小何', lang: 'zh', gender: 'female', recommended: true },
+  { id: 'zh_female_shuangkuaisisi_moon_bigtts', label: '双快思思', lang: 'zh', gender: 'female' },
+
+  // Chinese Female — Streaming
+  { id: 'BV700_streaming', label: '灿灿', lang: 'zh', gender: 'female', recommended: true },
+  { id: 'BV406_streaming', label: '梓梓', lang: 'zh', gender: 'female' },
+  { id: 'BV405_streaming', label: '甜美小源', lang: 'zh', gender: 'female', recommended: true },
+  { id: 'BV007_streaming', label: '亲切女声', lang: 'zh', gender: 'female' },
+  { id: 'BV009_streaming', label: '知性女声', lang: 'zh', gender: 'female' },
+  { id: 'BV104_streaming', label: '温柔淑女', lang: 'zh', gender: 'female' },
+  { id: 'BV428_streaming', label: '清新文艺女声', lang: 'zh', gender: 'female' },
+  { id: 'BV005_streaming', label: '活泼女声', lang: 'zh', gender: 'female' },
+
+  // Chinese Male — Streaming
+  { id: 'BV701_streaming', label: '擎苍', lang: 'zh', gender: 'male', recommended: true },
+  { id: 'BV407_streaming', label: '燃燃', lang: 'zh', gender: 'male' },
+  { id: 'BV705_streaming', label: '炀炀', lang: 'zh', gender: 'male' },
+  { id: 'BV008_streaming', label: '亲切男声', lang: 'zh', gender: 'male', recommended: true },
+  { id: 'BV123_streaming', label: '阳光青年', lang: 'zh', gender: 'male' },
+  { id: 'BV004_streaming', label: '开朗青年', lang: 'zh', gender: 'male' },
+  { id: 'BV102_streaming', label: '儒雅青年', lang: 'zh', gender: 'male' },
+  { id: 'BV006_streaming', label: '磁性男声', lang: 'zh', gender: 'male' },
+
+  // English — Streaming
+  { id: 'BV001_streaming', label: 'English Female (General)', lang: 'en', gender: 'female', recommended: true },
+  { id: 'BV002_streaming', label: 'English Male (General)', lang: 'en', gender: 'male', recommended: true },
+
+  // Special
+  { id: 'BV034_streaming', label: '知性姐姐', lang: 'zh', gender: 'female' },
+  { id: 'BV033_streaming', label: '温柔小哥', lang: 'zh', gender: 'male' },
+];
+
+function inferCloudVoiceLang(voiceId: string): 'zh' | 'en' {
+  const lower = voiceId.toLowerCase();
+  if (lower.startsWith('en_') || lower.includes('english')) return 'en';
+  if (voiceId === 'BV001_streaming' || voiceId === 'BV002_streaming') return 'en';
+  return 'zh';
+}
+
+function inferCloudVoiceGender(voiceId: string): 'female' | 'male' {
+  const lower = voiceId.toLowerCase();
+  if (lower.includes('_male_') && !lower.includes('_female_')) return 'male';
+  if (voiceId === 'BV002_streaming') return 'male';
+  return 'female';
+}
+
+function buildCloudVoiceList(currentVoice: string): CloudVoiceInfo[] {
+  const voices: CloudVoiceInfo[] = [...STUDIO_CLOUD_VOICES];
+
+  if (currentVoice && !voices.some((v) => v.id === currentVoice)) {
+    voices.unshift({
+      id: currentVoice,
+      label: `当前音色 (${currentVoice})`,
+      lang: inferCloudVoiceLang(currentVoice),
+      gender: inferCloudVoiceGender(currentVoice),
+      recommended: true,
+    });
+  }
+
+  return voices;
+}
+
 function buildSpeakerList(): SpeakerInfo[] {
   const speakers: SpeakerInfo[] = [];
 
@@ -288,35 +360,9 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
   // API: Cloud voices list
   if (pathname === '/api/cloud/voices' && req.method === 'GET') {
-    const cloudVoices = [
-      // Chinese Female — General
-      { id: 'BV700_streaming', label: '灿灿', lang: 'zh', gender: 'female', recommended: true },
-      { id: 'BV406_streaming', label: '梓梓', lang: 'zh', gender: 'female' },
-      { id: 'BV405_streaming', label: '甜美小源', lang: 'zh', gender: 'female', recommended: true },
-      { id: 'BV007_streaming', label: '亲切女声', lang: 'zh', gender: 'female' },
-      { id: 'BV009_streaming', label: '知性女声', lang: 'zh', gender: 'female' },
-      { id: 'BV001_streaming', label: '通用女声', lang: 'zh', gender: 'female' },
-      { id: 'BV104_streaming', label: '温柔淑女', lang: 'zh', gender: 'female' },
-      { id: 'BV428_streaming', label: '清新文艺女声', lang: 'zh', gender: 'female' },
-      { id: 'BV005_streaming', label: '活泼女声', lang: 'zh', gender: 'female' },
-      // Chinese Male — General
-      { id: 'BV701_streaming', label: '擎苍', lang: 'zh', gender: 'male', recommended: true },
-      { id: 'BV407_streaming', label: '燃燃', lang: 'zh', gender: 'male' },
-      { id: 'BV705_streaming', label: '炀炀', lang: 'zh', gender: 'male' },
-      { id: 'BV002_streaming', label: '通用男声', lang: 'zh', gender: 'male' },
-      { id: 'BV008_streaming', label: '亲切男声', lang: 'zh', gender: 'male', recommended: true },
-      { id: 'BV123_streaming', label: '阳光青年', lang: 'zh', gender: 'male' },
-      { id: 'BV004_streaming', label: '开朗青年', lang: 'zh', gender: 'male' },
-      { id: 'BV102_streaming', label: '儒雅青年', lang: 'zh', gender: 'male' },
-      { id: 'BV006_streaming', label: '磁性男声', lang: 'zh', gender: 'male' },
-      // Special
-      { id: 'BV034_streaming', label: '知性姐姐', lang: 'zh', gender: 'female' },
-      { id: 'BV033_streaming', label: '温柔小哥', lang: 'zh', gender: 'male' },
-    ];
-
     const config = getConfig();
     jsonResponse(res, {
-      voices: cloudVoices,
+      voices: buildCloudVoiceList(config.tts.voice),
       currentProvider: config.tts.provider,
       currentVoice: config.tts.voice,
     });
@@ -327,9 +373,9 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   if (pathname === '/api/preview/cloud-tts' && req.method === 'POST') {
     const body = JSON.parse(await readBody(req));
     const text = body.text || '你好，我是你的编程助手';
-    const voiceType = body.voice_type || 'zh_female_shuangkuaisisi_moon_bigtts';
-    const speed = typeof body.speed === 'number' ? body.speed : 1.0;
     const config = getConfig();
+    const voiceType = body.voice_type || config.tts.voice || 'zh_female_wanwanxiaohe_moon_bigtts';
+    const speed = typeof body.speed === 'number' ? body.speed : 1.0;
     const endpoint = config.tts.cloud.endpoint;
 
     try {
