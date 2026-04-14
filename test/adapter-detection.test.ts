@@ -144,12 +144,28 @@ test('codex adapter reports integrated only after skill, instructions, hooks, an
           SessionStart: [
             {
               matcher: 'startup|resume',
-              hooks: [{ type: 'command', command: 'bash /tmp/auto-start.sh' }],
+              hooks: [
+                { type: 'command', command: 'node /tmp/echocoding-hook.js' },
+                { type: 'command', command: 'bash /tmp/auto-start.sh' },
+              ],
             },
           ],
           UserPromptSubmit: [
             {
-              hooks: [{ type: 'command', command: 'bash /tmp/voice-reminder.sh' }],
+              hooks: [
+                { type: 'command', command: 'node /tmp/echocoding-hook.js' },
+                { type: 'command', command: 'bash /tmp/voice-reminder.sh' },
+              ],
+            },
+          ],
+          PreToolUse: [
+            {
+              hooks: [{ type: 'command', command: 'node /tmp/echocoding-hook.js' }],
+            },
+          ],
+          PostToolUse: [
+            {
+              hooks: [{ type: 'command', command: 'node /tmp/echocoding-hook.js' }],
             },
           ],
         },

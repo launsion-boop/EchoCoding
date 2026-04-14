@@ -272,6 +272,11 @@ function getCodexVoiceReminderCommand(): string {
   return `ECHOCODING_HOOK_CLIENT=codex ECHOCODING_CLIENT=codex bash ${shellQuote(script)}`;
 }
 
+function getCodexHookCommand(): string {
+  const hookScript = path.join(getPackageRoot(), 'dist', 'bin', 'echocoding-hook.js');
+  return `ECHOCODING_CLIENT=codex ${shellQuote(process.execPath)} ${shellQuote(hookScript)}`;
+}
+
 function getCodexAutoStartCommand(): string {
   const script = path.join(getPackageRoot(), 'scripts', 'auto-start.sh');
   return `ECHOCODING_CLIENT=codex ECHOCODING_NODE=${shellQuote(process.execPath)} bash ${shellQuote(script)}`;
@@ -488,7 +493,7 @@ function readCodexHooksFile(): CodexHooksFile {
 function upsertCodexHooks(config: CodexHooksFile): CodexHooksFile {
   const next: CodexHooksFile = { ...config, hooks: { ...(config.hooks ?? {}) } };
 
-  upsertCodexHookGroup(next.hooks!, 'SessionStart', 'auto-start', {
+  upsertCodexManagedGroup(next.hooks!, 'SessionStart', ['echocoding-hook', 'auto-start'], {
     matcher: 'startup|resume',
     hooks: [
       {
@@ -496,17 +501,36 @@ function upsertCodexHooks(config: CodexHooksFile): CodexHooksFile {
         command: getCodexAutoStartCommand(),
         statusMessage: 'Starting EchoCoding daemon',
       },
+      {
+        type: 'command',
+        command: getCodexHookCommand(),
+      },
     ],
   });
 
-  upsertCodexHookGroup(next.hooks!, 'UserPromptSubmit', 'voice-reminder', {
+  upsertCodexManagedGroup(next.hooks!, 'UserPromptSubmit', ['echocoding-hook', 'voice-reminder'], {
     hooks: [
       {
         type: 'command',
         command: getCodexVoiceReminderCommand(),
       },
+      {
+        type: 'command',
+        command: getCodexHookCommand(),
+      },
     ],
   });
+
+  for (const eventName of ['PreToolUse', 'PostToolUse', 'Notification', 'Stop', 'SubagentStart', 'SubagentStop', 'PreCompact']) {
+    upsertCodexManagedGroup(next.hooks!, eventName, ['echocoding-hook'], {
+      hooks: [
+        {
+          type: 'command',
+          command: getCodexHookCommand(),
+        },
+      ],
+    });
+  }
 
   return next;
 }
@@ -522,6 +546,7 @@ function removeCodexHooks(config: CodexHooksFile): CodexHooksFile {
         ...group,
         hooks: group.hooks.filter(
           (hook) =>
+            !hook.command.includes('echocoding-hook') &&
             !hook.command.includes('voice-reminder') &&
             !hook.command.includes('auto-start'),
         ),
@@ -542,46 +567,30 @@ function removeCodexHooks(config: CodexHooksFile): CodexHooksFile {
   return next;
 }
 
-function upsertCodexHookGroup(
+function upsertCodexManagedGroup(
   hooks: Record<string, CodexHookMatcher[]>,
   eventName: string,
-  commandNeedle: string,
+  managedCommandNeedles: string[],
   desiredGroup: CodexHookMatcher,
 ): void {
   const groups = hooks[eventName] ?? [];
-  const normalized: CodexHookMatcher[] = [];
-  let inserted = false;
+  const normalized: CodexHookMatcher[] = groups
+    .map((group) => {
+      const retainedHooks = group.hooks.filter(
+        (hook) => !managedCommandNeedles.some((needle) => hook.command.includes(needle)),
+      );
+      if (retainedHooks.length === 0) return null;
+      return {
+        ...group,
+        hooks: retainedHooks,
+      };
+    })
+    .filter((group): group is CodexHookMatcher => group !== null);
 
-  for (const group of groups) {
-    const retainedHooks = group.hooks.filter((hook) => !hook.command.includes(commandNeedle));
-
-    if (retainedHooks.length !== group.hooks.length) {
-      if (!inserted) {
-        normalized.push({
-          ...desiredGroup,
-          hooks: desiredGroup.hooks.map((hook) => ({ ...hook })),
-        });
-        inserted = true;
-      }
-
-      if (retainedHooks.length > 0) {
-        normalized.push({
-          ...group,
-          hooks: retainedHooks,
-        });
-      }
-      continue;
-    }
-
-    normalized.push(group);
-  }
-
-  if (!inserted) {
-    normalized.push({
-      ...desiredGroup,
-      hooks: desiredGroup.hooks.map((hook) => ({ ...hook })),
-    });
-  }
+  normalized.push({
+    ...desiredGroup,
+    hooks: desiredGroup.hooks.map((hook) => ({ ...hook })),
+  });
 
   hooks[eventName] = normalized;
 }

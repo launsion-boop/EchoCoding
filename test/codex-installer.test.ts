@@ -77,17 +77,62 @@ test('installCodex writes a Codex skill directory and migrates legacy instructio
   const hooks = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
   assert.equal(Array.isArray(hooks.hooks?.SessionStart), true);
   assert.equal(Array.isArray(hooks.hooks?.UserPromptSubmit), true);
+  assert.equal(Array.isArray(hooks.hooks?.PreToolUse), true);
+  assert.equal(Array.isArray(hooks.hooks?.PostToolUse), true);
+  assert.equal(Array.isArray(hooks.hooks?.Notification), true);
+  assert.equal(Array.isArray(hooks.hooks?.Stop), true);
+  assert.equal(Array.isArray(hooks.hooks?.SubagentStart), true);
+  assert.equal(Array.isArray(hooks.hooks?.SubagentStop), true);
+  assert.equal(Array.isArray(hooks.hooks?.PreCompact), true);
+  const sessionStartCommands = hooks.hooks.SessionStart
+    .flatMap((g: { hooks: Array<{ command?: string }> }) => g.hooks.map((h) => h.command))
+    .join('\n');
   assert.match(
-    hooks.hooks.SessionStart[0].hooks[0].command,
+    sessionStartCommands,
+    /echocoding-hook/,
+  );
+  assert.match(
+    sessionStartCommands,
     /ECHOCODING_CLIENT=codex .*auto-start\.sh/,
   );
-  assert.equal(
-    hooks.hooks.SessionStart[0].hooks[0].statusMessage,
-    'Starting EchoCoding daemon',
+  assert.match(
+    hooks.hooks.PreToolUse[0].hooks[0].command,
+    /ECHOCODING_CLIENT=codex .*echocoding-hook\.js/,
   );
   assert.match(
-    hooks.hooks.UserPromptSubmit[0].hooks[0].command,
+    hooks.hooks.PostToolUse[0].hooks[0].command,
+    /ECHOCODING_CLIENT=codex .*echocoding-hook\.js/,
+  );
+  assert.equal(
+    hooks.hooks.SessionStart.find((g: { hooks: Array<{ command?: string; statusMessage?: string }> }) =>
+      g.hooks.some((h) => h.command?.includes('auto-start')),
+    ).hooks.find((h: { command?: string }) => h.command?.includes('auto-start')).statusMessage,
+    'Starting EchoCoding daemon',
+  );
+  assert.equal(
+    hooks.hooks.SessionStart.some((g: { hooks: Array<{ command?: string }> }) =>
+      g.hooks.some((h) => h.command?.includes('auto-start')) &&
+      g.hooks.some((h) => h.command?.includes('echocoding-hook')),
+    ),
+    true,
+  );
+  const userPromptSubmitCommands = hooks.hooks.UserPromptSubmit
+    .flatMap((g: { hooks: Array<{ command?: string }> }) => g.hooks.map((h) => h.command))
+    .join('\n');
+  assert.match(
+    userPromptSubmitCommands,
+    /echocoding-hook/,
+  );
+  assert.match(
+    userPromptSubmitCommands,
     /ECHOCODING_HOOK_CLIENT=codex ECHOCODING_CLIENT=codex .*voice-reminder\.sh/,
+  );
+  assert.equal(
+    hooks.hooks.UserPromptSubmit.some((g: { hooks: Array<{ command?: string }> }) =>
+      g.hooks.some((h) => h.command?.includes('voice-reminder')) &&
+      g.hooks.some((h) => h.command?.includes('echocoding-hook')),
+    ),
+    true,
   );
 });
 
@@ -147,9 +192,29 @@ test('installCodex is idempotent and uninstallCodex removes managed artifacts wh
   assert.match(configAfterInstall, /\[features\][\s\S]*fast_mode = true/);
 
   const hooksAfterInstall = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
-  assert.equal(hooksAfterInstall.hooks.Stop.length, 1);
-  assert.equal(hooksAfterInstall.hooks.SessionStart.length, 1);
-  assert.equal(hooksAfterInstall.hooks.UserPromptSubmit.length, 1);
+  assert.equal(hooksAfterInstall.hooks.Stop.length >= 2, true);
+  assert.equal(hooksAfterInstall.hooks.SessionStart.length >= 1, true);
+  assert.equal(hooksAfterInstall.hooks.UserPromptSubmit.length >= 1, true);
+  assert.equal(
+    hooksAfterInstall.hooks.SessionStart.some((g: { hooks: Array<{ command?: string }> }) =>
+      g.hooks.some((h) => h.command?.includes('auto-start')) &&
+      g.hooks.some((h) => h.command?.includes('echocoding-hook')),
+    ),
+    true,
+  );
+  assert.equal(
+    hooksAfterInstall.hooks.UserPromptSubmit.some((g: { hooks: Array<{ command?: string }> }) =>
+      g.hooks.some((h) => h.command?.includes('voice-reminder')) &&
+      g.hooks.some((h) => h.command?.includes('echocoding-hook')),
+    ),
+    true,
+  );
+  assert.equal(Array.isArray(hooksAfterInstall.hooks.PreToolUse), true);
+  assert.equal(Array.isArray(hooksAfterInstall.hooks.PostToolUse), true);
+  assert.equal(Array.isArray(hooksAfterInstall.hooks.Notification), true);
+  assert.equal(Array.isArray(hooksAfterInstall.hooks.SubagentStart), true);
+  assert.equal(Array.isArray(hooksAfterInstall.hooks.SubagentStop), true);
+  assert.equal(Array.isArray(hooksAfterInstall.hooks.PreCompact), true);
 
   const uninstallResult = uninstallCodex();
   assert.equal(uninstallResult.success, true);
