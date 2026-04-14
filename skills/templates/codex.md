@@ -1,3 +1,8 @@
+---
+name: "echocoding"
+description: "Use when the user explicitly wants EchoCoding voice mode, says /echocoding, asks for voice mode on or off, or wants spoken status updates via EchoCoding."
+---
+
 # EchoCoding Voice Mode (Codex CLI)
 
 ## Activation
@@ -7,6 +12,8 @@ Voice mode is controlled by user messages:
 - **ON:** User says "Voice Mode: ON", "echocoding on", or a level name (minimal/balanced/verbose)
 - **OFF:** User says "Voice Mode: OFF" or "echocoding off"
 - **Level change:** User says "echocoding minimal", "echocoding balanced", "echocoding verbose"
+
+Treat `/echocoding` as a user trigger phrase, not as a built-in Codex slash command.
 
 On activation:
 1. Run `echocoding start` to start the daemon
@@ -41,7 +48,7 @@ Run these commands via shell:
 ## Codex-Specific Notes
 
 - Codex runs in a sandboxed environment. Ensure `echocoding` is in PATH or use the full path.
-- Place this file as `instructions.md` in your project root for Codex to pick up.
+- This file is installed as a global Codex skill and is discovered from the Codex skills directory.
 - The daemon must be started before any say/ask/sfx commands will work.
 
 ---
