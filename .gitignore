@@ -2,3 +2,8 @@ node_modules/
 dist/
 *.tgz
 .DS_Store
+
+# Proxy secrets — never commit API keys
+proxy/ecosystem.config.cjs
+proxy/.env
+*.env

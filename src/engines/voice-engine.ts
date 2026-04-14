@@ -186,11 +186,18 @@ async function speakViaSherpa(text: string): Promise<void> {
   }, 30_000);
 }
 
-// --- Cloud TTS ---
+// --- Cloud TTS (Volcengine via proxy) ---
 
+/**
+ * Cloud TTS flow:
+ * 1. Client → api.echoclaw.com/v1/tts (our proxy, no key needed)
+ * 2. Proxy  → openspeech.bytedance.com/api/v1/tts (Volcengine, key on server)
+ *
+ * If user has their own Volcengine key, they can configure it to call direct.
+ */
 async function speakCloud(text: string): Promise<void> {
   const config = getConfig();
-  const { endpoint, apiKey, stream: useStream } = config.tts.cloud;
+  const { endpoint, apiKey } = config.tts.cloud;
 
   if (!endpoint) {
     throw new Error('Cloud TTS endpoint not configured');
@@ -198,47 +205,149 @@ async function speakCloud(text: string): Promise<void> {
 
   fs.mkdirSync(TEMP_DIR, { recursive: true });
   const tempFile = path.join(TEMP_DIR, `tts-${Date.now()}.mp3`);
-
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (apiKey) {
-    headers['Authorization'] = `Bearer ${apiKey}`;
-  }
-
   const cleanText = stripEmotionTags(text);
-  const body = JSON.stringify({
-    text: cleanText,
-    voice: config.tts.voice,
-    speed: config.tts.speed,
-    language: config.tts.language,
-    stream: useStream,
-    format: 'mp3',
-  });
 
-  const response = await fetch(endpoint, { method: 'POST', headers, body });
+  // Detect if endpoint is Volcengine direct or our proxy
+  const isVolcDirect = endpoint.includes('openspeech.bytedance.com');
 
-  if (!response.ok || !response.body) {
-    throw new Error(`Cloud TTS error: ${response.status}`);
+  let audioBuffer: Buffer;
+
+  if (isVolcDirect) {
+    // Direct Volcengine API call (user has own key)
+    audioBuffer = await callVolcengineTts(cleanText, config, apiKey);
+  } else {
+    // Our proxy (api.echoclaw.com) — simplified request, proxy adds key
+    audioBuffer = await callProxyTts(cleanText, config, endpoint);
   }
 
-  const fileStream = fs.createWriteStream(tempFile);
-  const reader = response.body.getReader();
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      fileStream.write(Buffer.from(value));
-    }
-  } finally {
-    fileStream.end();
-  }
-  await new Promise<void>((resolve) => fileStream.on('finish', resolve));
-
+  fs.writeFileSync(tempFile, audioBuffer);
   const vol = Math.round((config.volume / 100) * 100);
   playAudioFile(tempFile, vol);
 
   setTimeout(() => {
     try { fs.unlinkSync(tempFile); } catch { /* ignore */ }
   }, 30_000);
+}
+
+/**
+ * Call Volcengine TTS API directly (user has own API key).
+ */
+async function callVolcengineTts(
+  text: string,
+  config: ReturnType<typeof getConfig>,
+  apiKey: string,
+): Promise<Buffer> {
+  const reqid = crypto.randomUUID();
+  const voiceType = resolveVolcVoice(config.tts.voice, text);
+
+  const body = JSON.stringify({
+    app: {
+      appid: config.tts.cloud.appId || '',
+      token: apiKey,
+      cluster: 'volcano_tts',
+    },
+    user: { uid: 'echocoding' },
+    audio: {
+      voice_type: voiceType,
+      encoding: 'mp3',
+      speed_ratio: config.tts.speed,
+      volume_ratio: 1.0,
+      pitch_ratio: 1.0,
+    },
+    request: {
+      reqid,
+      text,
+      text_type: 'plain',
+      operation: 'query',
+    },
+  });
+
+  const response = await fetch('https://openspeech.bytedance.com/api/v1/tts', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer;${apiKey}`,
+    },
+    body,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Volcengine TTS error: ${response.status}`);
+  }
+
+  const result = await response.json() as { code?: number; data?: string; message?: string };
+
+  if (result.code !== 3000 || !result.data) {
+    throw new Error(`Volcengine TTS failed: ${result.message || result.code}`);
+  }
+
+  // Response data is base64-encoded audio
+  return Buffer.from(result.data, 'base64');
+}
+
+/**
+ * Call our proxy (api.echoclaw.com/v1/tts).
+ * Proxy holds the Volcengine key — client just sends text + voice preference.
+ */
+async function callProxyTts(
+  text: string,
+  config: ReturnType<typeof getConfig>,
+  endpoint: string,
+): Promise<Buffer> {
+  const voiceType = resolveVolcVoice(config.tts.voice, text);
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      text,
+      voice_type: voiceType,
+      speed: config.tts.speed,
+      encoding: 'mp3',
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Proxy TTS error: ${response.status}`);
+  }
+
+  const result = await response.json() as { data?: string; audio?: string; error?: string };
+
+  if (result.error) {
+    throw new Error(`Proxy TTS: ${result.error}`);
+  }
+
+  // Proxy returns base64-encoded audio in data or audio field
+  const audioData = result.data || result.audio;
+  if (!audioData) {
+    throw new Error('Proxy TTS: no audio data in response');
+  }
+
+  return Buffer.from(audioData, 'base64');
+}
+
+/**
+ * Map EchoCoding voice config to Volcengine voice_type.
+ * Volcengine has many voices — map our presets to their IDs.
+ */
+function resolveVolcVoice(voice: string, text: string): string {
+  // If voice looks like a Volcengine voice_type ID, use directly
+  if (voice.includes('_') && voice.length > 10) {
+    return voice;
+  }
+
+  // Map our presets to Volcengine voices
+  const isChinese = containsChinese(text);
+
+  const VOLC_VOICES: Record<string, string> = {
+    'zh-female': 'zh_female_shuangkuaisisi_moon_bigtts',
+    'zh-male': 'zh_male_chunhou_moon_bigtts',
+    'en-female': 'en_female_sarah_moon_bigtts',
+    'en-male': 'en_male_adam_moon_bigtts',
+    'default': isChinese ? 'zh_female_shuangkuaisisi_moon_bigtts' : 'en_female_sarah_moon_bigtts',
+  };
+
+  return VOLC_VOICES[voice] || VOLC_VOICES['default'];
 }
 
 // --- System Fallback ---

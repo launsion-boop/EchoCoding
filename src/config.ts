@@ -24,10 +24,11 @@ export interface EchoConfig {
       orpheusModel: string;    // model variant: '150m' | '400m' | '1b'
       kokoroModel: string;     // kokoro model name
     };
-    // Cloud API settings
+    // Cloud API settings (Volcengine or proxy)
     cloud: {
-      endpoint: string;
-      apiKey: string;
+      endpoint: string;     // api.echoclaw.com/v1/tts (proxy) or openspeech.bytedance.com (direct)
+      apiKey: string;        // only needed for direct Volcengine calls
+      appId: string;         // Volcengine App ID (only for direct calls)
       stream: boolean;
     };
     voice: string;
@@ -47,8 +48,9 @@ export interface EchoConfig {
       modelsDir: string;
     };
     cloud: {
-      endpoint: string;
+      endpoint: string;     // api.echoclaw.com/v1/asr (proxy) or Volcengine direct
       apiKey: string;
+      appId: string;         // Volcengine App ID
     };
     timeout: number;
   };
@@ -81,8 +83,9 @@ const DEFAULT_CONFIG: EchoConfig = {
       kokoroModel: 'kokoro-multi-lang-v1_1',
     },
     cloud: {
-      endpoint: 'https://api.echoclaw.com/v1/tts',
+      endpoint: 'https://coding.echoclaw.me/v1/tts',
       apiKey: '',
+      appId: '',
       stream: true,
     },
     voice: 'default',
@@ -102,8 +105,9 @@ const DEFAULT_CONFIG: EchoConfig = {
       modelsDir: path.join(CONFIG_DIR, 'models'),
     },
     cloud: {
-      endpoint: 'https://api.echoclaw.com/v1/asr',
+      endpoint: 'https://coding.echoclaw.me/v1/asr',
       apiKey: '',
+      appId: '',
     },
     timeout: 6,
   },

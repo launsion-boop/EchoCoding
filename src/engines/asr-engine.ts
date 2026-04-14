@@ -222,8 +222,14 @@ function recognizeFile(wavFile: string): string {
   return result.text?.trim() ?? '';
 }
 
-// --- Cloud ASR ---
+// --- Cloud ASR (Volcengine via proxy) ---
 
+/**
+ * Cloud ASR flow:
+ * 1. Record audio locally via sox
+ * 2. Send WAV to api.echoclaw.com/v1/asr (our proxy) or Volcengine direct
+ * 3. Proxy forwards to Volcengine, returns recognized text
+ */
 async function listenCloud(timeoutSec: number): Promise<string> {
   const config = getConfig();
   const { endpoint, apiKey } = config.asr.cloud;
@@ -233,38 +239,118 @@ async function listenCloud(timeoutSec: number): Promise<string> {
   }
 
   // Record audio first
+  playSfx('mic-ready');
+  await new Promise((r) => setTimeout(r, 300));
+
   const audioFile = await recordMicrophone(timeoutSec);
   if (!audioFile) {
     return '[timeout]';
   }
 
   try {
-    // Send to cloud ASR
-    const formData = new FormData();
-    const audioBlob = new Blob([fs.readFileSync(audioFile)], { type: 'audio/wav' });
-    formData.append('audio', audioBlob, 'recording.wav');
-    formData.append('language', 'auto');
+    const audioData = fs.readFileSync(audioFile);
+    const audioBase64 = audioData.toString('base64');
 
-    const headers: Record<string, string> = {};
-    if (apiKey) {
-      headers['Authorization'] = `Bearer ${apiKey}`;
+    // Detect if endpoint is Volcengine direct or our proxy
+    const isVolcDirect = endpoint.includes('openspeech.bytedance.com');
+
+    if (isVolcDirect) {
+      // Direct Volcengine: send base64 audio via their format
+      return await callVolcengineAsr(audioBase64, config, apiKey);
+    } else {
+      // Our proxy: simplified request
+      return await callProxyAsr(audioBase64, endpoint);
     }
-
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers,
-      body: formData,
-    });
-
-    if (!response.ok) {
-      throw new Error(`Cloud ASR error: ${response.status}`);
-    }
-
-    const result = await response.json() as { text?: string };
-    return result.text?.trim() ?? '[empty]';
   } finally {
     try { fs.unlinkSync(audioFile); } catch { /* ignore */ }
   }
+}
+
+/**
+ * Call Volcengine ASR API directly (user has own key).
+ * Uses the recording file upload endpoint.
+ */
+async function callVolcengineAsr(
+  audioBase64: string,
+  config: ReturnType<typeof getConfig>,
+  apiKey: string,
+): Promise<string> {
+  const reqid = crypto.randomUUID();
+
+  const body = JSON.stringify({
+    app: {
+      appid: config.asr.cloud.appId || '',
+      token: apiKey,
+      cluster: 'volcengine_streaming_common',
+    },
+    user: { uid: 'echocoding' },
+    audio: {
+      format: 'wav',
+      rate: 16000,
+      bits: 16,
+      channel: 1,
+      language: 'zh-CN',
+    },
+    request: {
+      reqid,
+      sequence: -1,
+      nbest: 1,
+      text: audioBase64,
+    },
+  });
+
+  const response = await fetch('https://openspeech.bytedance.com/api/v2/asr', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer;${apiKey}`,
+    },
+    body,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Volcengine ASR error: ${response.status}`);
+  }
+
+  const result = await response.json() as {
+    code?: number;
+    message?: string;
+    result?: Array<{ text?: string }>;
+  };
+
+  if (result.code !== 1000 || !result.result?.[0]?.text) {
+    throw new Error(`Volcengine ASR failed: ${result.message || result.code}`);
+  }
+
+  return result.result[0].text.trim();
+}
+
+/**
+ * Call our proxy (api.echoclaw.com/v1/asr).
+ * Proxy holds the Volcengine key — client sends base64 audio.
+ */
+async function callProxyAsr(audioBase64: string, endpoint: string): Promise<string> {
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      audio: audioBase64,
+      format: 'wav',
+      language: 'zh-CN',
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Proxy ASR error: ${response.status}`);
+  }
+
+  const result = await response.json() as { text?: string; error?: string };
+
+  if (result.error) {
+    throw new Error(`Proxy ASR: ${result.error}`);
+  }
+
+  return result.text?.trim() ?? '[empty]';
 }
 
 // --- Cleanup ---

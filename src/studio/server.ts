@@ -285,6 +285,94 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     return;
   }
 
+  // API: Cloud voices list
+  if (pathname === '/api/cloud/voices' && req.method === 'GET') {
+    const cloudVoices = [
+      // Chinese Female
+      { id: 'zh_female_shuangkuaisisi_moon_bigtts', label: '爽快思思', lang: 'zh', gender: 'female', recommended: true },
+      { id: 'zh_female_wanwanxiaohe_moon_bigtts', label: '弯弯小何', lang: 'zh', gender: 'female' },
+      { id: 'zh_female_tianmeixiaoyuan_moon_bigtts', label: '甜美小媛', lang: 'zh', gender: 'female', recommended: true },
+      { id: 'zh_female_qingxinnvsheng_moon_bigtts', label: '清新女声', lang: 'zh', gender: 'female' },
+      { id: 'zh_female_sajiaonvyou_moon_bigtts', label: '撒娇女友', lang: 'zh', gender: 'female' },
+      { id: 'zh_female_wenrouxiaoya_moon_bigtts', label: '温柔小雅', lang: 'zh', gender: 'female' },
+      // Chinese Male
+      { id: 'zh_male_chunhou_moon_bigtts', label: '淳厚', lang: 'zh', gender: 'male', recommended: true },
+      { id: 'zh_male_yangguangqingnian_moon_bigtts', label: '阳光青年', lang: 'zh', gender: 'male' },
+      { id: 'zh_male_yuanqinanhai_moon_bigtts', label: '元气男孩', lang: 'zh', gender: 'male' },
+      { id: 'zh_male_aojiaobazong_moon_bigtts', label: '傲娇霸总', lang: 'zh', gender: 'male', recommended: true },
+      // English Female
+      { id: 'en_female_sarah_moon_bigtts', label: 'Sarah', lang: 'en', gender: 'female', recommended: true },
+      { id: 'en_female_anna_moon_bigtts', label: 'Anna', lang: 'en', gender: 'female' },
+      // English Male
+      { id: 'en_male_adam_moon_bigtts', label: 'Adam', lang: 'en', gender: 'male', recommended: true },
+      { id: 'en_male_bob_moon_bigtts', label: 'Bob', lang: 'en', gender: 'male' },
+    ];
+
+    const config = getConfig();
+    jsonResponse(res, {
+      voices: cloudVoices,
+      currentProvider: config.tts.provider,
+      currentVoice: config.tts.voice,
+    });
+    return;
+  }
+
+  // API: Cloud TTS preview — proxy to Volcengine
+  if (pathname === '/api/preview/cloud-tts' && req.method === 'POST') {
+    const body = JSON.parse(await readBody(req));
+    const text = body.text || '你好，我是你的编程助手';
+    const voiceType = body.voice_type || 'zh_female_shuangkuaisisi_moon_bigtts';
+    const speed = typeof body.speed === 'number' ? body.speed : 1.0;
+    const config = getConfig();
+    const endpoint = config.tts.cloud.endpoint;
+
+    try {
+      const proxyRes = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, voice_type: voiceType, speed, encoding: 'mp3' }),
+      });
+
+      if (!proxyRes.ok) {
+        jsonResponse(res, { error: `Cloud TTS error: ${proxyRes.status}` }, 502);
+        return;
+      }
+
+      const result = await proxyRes.json() as { data?: string; error?: string };
+      if (result.error || !result.data) {
+        jsonResponse(res, { error: result.error || 'No audio data' }, 502);
+        return;
+      }
+
+      // Return raw MP3 bytes
+      const audioBuffer = Buffer.from(result.data, 'base64');
+      res.writeHead(200, {
+        'Content-Type': 'audio/mpeg',
+        'Content-Length': audioBuffer.length,
+        'Access-Control-Allow-Origin': '*',
+      });
+      res.end(audioBuffer);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      jsonResponse(res, { error: `Cloud TTS unavailable: ${msg}` }, 502);
+    }
+    return;
+  }
+
+  // API: Switch TTS provider
+  if (pathname === '/api/provider' && req.method === 'POST') {
+    const body = JSON.parse(await readBody(req));
+    if (body.provider === 'local' || body.provider === 'cloud') {
+      const config = getConfig();
+      config.tts.provider = body.provider;
+      saveConfig(config);
+      jsonResponse(res, { ok: true, provider: body.provider });
+    } else {
+      jsonResponse(res, { error: 'Invalid provider. Use "local" or "cloud"' }, 400);
+    }
+    return;
+  }
+
   // API: Set voice (convenience endpoint)
   if (pathname === '/api/voice' && req.method === 'POST') {
     const body = JSON.parse(await readBody(req));

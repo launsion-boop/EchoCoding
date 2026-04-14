@@ -295,20 +295,39 @@
   <div class="section">
     <div class="section-title">Voice Browser <span class="badge" id="voiceCount"></span></div>
 
+    <!-- Provider Toggle -->
+    <div class="filter-tabs" id="providerTabs" style="margin-bottom:12px">
+      <div class="filter-tab active" data-provider="local" onclick="switchProvider('local', this)">Local (Kokoro)</div>
+      <div class="filter-tab" data-provider="cloud" onclick="switchProvider('cloud', this)">Cloud (Volcengine)</div>
+    </div>
+
     <div class="preview-input-row">
       <input type="text" id="previewText" value="你好，我是你的编程助手，很高兴认识你" placeholder="Preview text...">
     </div>
 
-    <div class="filter-tabs" id="filterTabs">
-      <div class="filter-tab active" data-filter="recommended">Recommended</div>
-      <div class="filter-tab" data-filter="all">All</div>
-      <div class="filter-tab" data-filter="zh-female">Chinese Female</div>
-      <div class="filter-tab" data-filter="zh-male">Chinese Male</div>
-      <div class="filter-tab" data-filter="en">English</div>
+    <!-- Local voices section -->
+    <div id="localVoiceSection">
+      <div class="filter-tabs" id="filterTabs">
+        <div class="filter-tab active" data-filter="recommended">Recommended</div>
+        <div class="filter-tab" data-filter="all">All</div>
+        <div class="filter-tab" data-filter="zh-female">Chinese Female</div>
+        <div class="filter-tab" data-filter="zh-male">Chinese Male</div>
+        <div class="filter-tab" data-filter="en">English</div>
+      </div>
+      <div class="speaker-grid" id="speakerGrid"></div>
+      <button class="show-all-btn" id="showAllBtn" style="display:none">Show All 103 Speakers</button>
     </div>
 
-    <div class="speaker-grid" id="speakerGrid"></div>
-    <button class="show-all-btn" id="showAllBtn" style="display:none">Show All 103 Speakers</button>
+    <!-- Cloud voices section (hidden by default) -->
+    <div id="cloudVoiceSection" style="display:none">
+      <div class="filter-tabs" id="cloudFilterTabs">
+        <div class="filter-tab active" data-filter="all" onclick="filterCloudVoices('all', this)">All</div>
+        <div class="filter-tab" data-filter="zh-female" onclick="filterCloudVoices('zh-female', this)">Chinese Female</div>
+        <div class="filter-tab" data-filter="zh-male" onclick="filterCloudVoices('zh-male', this)">Chinese Male</div>
+        <div class="filter-tab" data-filter="en" onclick="filterCloudVoices('en', this)">English</div>
+      </div>
+      <div class="speaker-grid" id="cloudSpeakerGrid"></div>
+    </div>
   </div>
 
   <!-- SFX Preview -->
@@ -369,11 +388,14 @@
 
   // --- Init ---
   async function init() {
-    const [speakerData, configData, statusData] = await Promise.all([
+    const [speakerData, configData, statusData, cloudData] = await Promise.all([
       api('/api/speakers'),
       api('/api/config'),
       api('/api/status'),
+      api('/api/cloud/voices').catch(() => ({ voices: [] })),
     ]);
+
+    cloudVoices = cloudData.voices || [];
 
     speakers = speakerData.speakers;
     currentVoice = speakerData.currentVoice;
@@ -604,8 +626,145 @@
     await updateSetting(key, !isOn);
   }
 
+  // --- Cloud Voice Support ---
+  let cloudVoices = [];
+  let cloudFilter = 'all';
+  let currentProvider = 'local';
+
+  async function switchProvider(provider, el) {
+    currentProvider = provider;
+    document.querySelectorAll('#providerTabs .filter-tab').forEach(t => t.classList.remove('active'));
+    el.classList.add('active');
+
+    if (provider === 'local') {
+      document.getElementById('localVoiceSection').style.display = '';
+      document.getElementById('cloudVoiceSection').style.display = 'none';
+      document.getElementById('voiceCount').textContent = `${speakers.length} voices`;
+    } else {
+      document.getElementById('localVoiceSection').style.display = 'none';
+      document.getElementById('cloudVoiceSection').style.display = '';
+      if (cloudVoices.length === 0) await loadCloudVoices();
+      document.getElementById('voiceCount').textContent = `${cloudVoices.length} voices`;
+      renderCloudVoices();
+    }
+
+    // Save provider preference
+    await api('/api/provider', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider }),
+    });
+  }
+
+  async function loadCloudVoices() {
+    setLoading(true);
+    try {
+      const data = await api('/api/cloud/voices');
+      cloudVoices = data.voices || [];
+      if (data.currentProvider) currentProvider = data.currentProvider;
+    } catch (e) {
+      console.error('Failed to load cloud voices:', e);
+    }
+    setLoading(false);
+  }
+
+  function filterCloudVoices(filter, el) {
+    cloudFilter = filter;
+    document.querySelectorAll('#cloudFilterTabs .filter-tab').forEach(t => t.classList.remove('active'));
+    el.classList.add('active');
+    renderCloudVoices();
+  }
+
+  function getFilteredCloudVoices() {
+    if (cloudFilter === 'all') return cloudVoices;
+    if (cloudFilter === 'zh-female') return cloudVoices.filter(v => v.lang === 'zh' && v.gender === 'female');
+    if (cloudFilter === 'zh-male') return cloudVoices.filter(v => v.lang === 'zh' && v.gender === 'male');
+    if (cloudFilter === 'en') return cloudVoices.filter(v => v.lang === 'en');
+    return cloudVoices;
+  }
+
+  function renderCloudVoices() {
+    const grid = document.getElementById('cloudSpeakerGrid');
+    const filtered = getFilteredCloudVoices();
+    grid.innerHTML = filtered.map(v => `
+      <div class="speaker-card ${v.id === String(currentVoice) ? 'active' : ''}" data-cloud-id="${v.id}">
+        <div class="sid" style="font-size:11px;word-break:break-all">${v.id.split('_').slice(0,3).join(' ')}</div>
+        <div class="label">${v.label}</div>
+        <div class="tags">
+          <span class="tag tag-${v.lang}">${v.lang.toUpperCase()}</span>
+          <span class="tag tag-${v.gender}">${v.gender}</span>
+          ${v.recommended ? '<span class="tag" style="background:#2a2a1a;color:var(--orange)">star</span>' : ''}
+        </div>
+        <div class="actions">
+          <button class="btn-sm" onclick="previewCloudVoice('${v.id}', event)">Play</button>
+          <button class="btn-sm primary" onclick="setCloudVoice('${v.id}', event)">Use This</button>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  async function previewCloudVoice(voiceId, e) {
+    if (e) e.stopPropagation();
+    if (playingAudio) { playingAudio.pause(); playingAudio = null; }
+
+    document.querySelectorAll('.speaker-card').forEach(c => c.classList.remove('playing'));
+    const card = document.querySelector(`[data-cloud-id="${voiceId}"]`);
+    if (card) card.classList.add('playing');
+
+    setLoading(true);
+    try {
+      const text = document.getElementById('previewText').value || '你好，我是你的编程助手';
+      const speed = config.tts?.speed || 1.0;
+      const res = await fetch('/api/preview/cloud-tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, voice_type: voiceId, speed }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      playingAudio = new Audio(url);
+      playingAudio.onended = () => {
+        if (card) card.classList.remove('playing');
+        playingAudio = null;
+      };
+      playingAudio.play();
+    } catch (err) {
+      console.error('Cloud preview failed:', err);
+      alert('Cloud TTS unavailable: ' + err.message);
+      if (card) card.classList.remove('playing');
+    }
+    setLoading(false);
+  }
+
+  async function setCloudVoice(voiceId, e) {
+    if (e) e.stopPropagation();
+    setLoading(true);
+    await api('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: 'tts.voice', value: voiceId }),
+    });
+    currentVoice = voiceId;
+    renderCloudVoices();
+    setLoading(false);
+  }
+
   // --- Boot ---
-  init().catch(err => console.error('Init failed:', err));
+  async function boot() {
+    await init();
+    // Restore provider tab if cloud was active
+    if (config.tts?.provider === 'cloud') {
+      const cloudTab = document.querySelector('[data-provider="cloud"]');
+      if (cloudTab) switchProvider('cloud', cloudTab);
+    }
+  }
+  boot().catch(err => console.error('Init failed:', err));
 </script>
 </body>
 </html>
