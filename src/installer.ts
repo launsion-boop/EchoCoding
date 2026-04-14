@@ -339,11 +339,14 @@ function stripCodexManagedText(instructions: string): string {
 }
 
 function removeDelimitedBlock(text: string, start: string, end: string): string {
-  const startIdx = text.indexOf(start);
-  if (startIdx === -1) return text;
-  const endIdx = text.indexOf(end, startIdx);
-  const removeEnd = endIdx === -1 ? text.length : endIdx + end.length;
-  return text.slice(0, startIdx) + text.slice(removeEnd);
+  let next = text;
+  while (true) {
+    const startIdx = next.indexOf(start);
+    if (startIdx === -1) return next;
+    const endIdx = next.indexOf(end, startIdx);
+    const removeEnd = endIdx === -1 ? next.length : endIdx + end.length;
+    next = next.slice(0, startIdx) + next.slice(removeEnd);
+  }
 }
 
 function removeLegacyCodexBlock(text: string): string {

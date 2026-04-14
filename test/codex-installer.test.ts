@@ -32,6 +32,11 @@ test('installCodex writes a Codex skill directory and migrates legacy instructio
     [
       '# Existing Instructions',
       '',
+      '<!-- echocoding-voice-mode:start -->',
+      '## EchoCoding Voice Mode',
+      'stale managed block',
+      '<!-- echocoding-voice-mode:end -->',
+      '',
       '## EchoCoding Voice Mode',
       'When user says "/echocoding" or "voice mode on", run `echocoding start` and follow the voice mode rules in the echocoding skill.',
       '',
