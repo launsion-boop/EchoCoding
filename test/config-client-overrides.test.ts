@@ -72,7 +72,7 @@ test('mode and voiceLevel are isolated per runtime client', async () => {
   }
 });
 
-test('non-mode settings remain shared while mode and voiceLevel stay scoped', async () => {
+test('runtime settings are scoped while base provider settings remain shared', async () => {
   const originalClient = process.env.ECHOCODING_CLIENT;
   const originalHookClient = process.env.ECHOCODING_HOOK_CLIENT;
 
@@ -83,23 +83,43 @@ test('non-mode settings remain shared while mode and voiceLevel stay scoped', as
     setRuntimeClient('default');
     configModule.setConfigValue('mode', 'sfx-only');
     configModule.setConfigValue('voiceLevel', 'minimal');
+    configModule.setConfigValue('enabled', 'true');
+    configModule.setConfigValue('volume', '66');
+    configModule.setConfigValue('tts.enabled', 'true');
+    configModule.setConfigValue('sfx.enabled', 'true');
+    configModule.setConfigValue('sfx.volume', '88');
 
     setRuntimeClient('codex');
     configModule.setConfigValue('mode', 'focus');
     configModule.setConfigValue('voiceLevel', 'verbose');
     configModule.setConfigValue('volume', '55');
+    configModule.setConfigValue('enabled', 'false');
+    configModule.setConfigValue('tts.enabled', 'false');
+    configModule.setConfigValue('sfx.enabled', 'false');
+    configModule.setConfigValue('sfx.volume', '22');
+    configModule.setConfigValue('tts.provider', 'local');
 
     setRuntimeClient('default');
     const globalConfig = configModule.getConfig();
     assert.equal(globalConfig.mode, 'sfx-only');
     assert.equal(globalConfig.voiceLevel, 'minimal');
-    assert.equal(globalConfig.volume, 55);
+    assert.equal(globalConfig.enabled, true);
+    assert.equal(globalConfig.volume, 66);
+    assert.equal(globalConfig.tts.enabled, true);
+    assert.equal(globalConfig.sfx.enabled, true);
+    assert.equal(globalConfig.sfx.volume, 88);
+    assert.equal(globalConfig.tts.provider, 'local');
 
     setRuntimeClient('codex');
     const codexConfig = configModule.getConfig();
     assert.equal(codexConfig.mode, 'focus');
     assert.equal(codexConfig.voiceLevel, 'verbose');
     assert.equal(codexConfig.volume, 55);
+    assert.equal(codexConfig.enabled, false);
+    assert.equal(codexConfig.tts.enabled, false);
+    assert.equal(codexConfig.sfx.enabled, false);
+    assert.equal(codexConfig.sfx.volume, 22);
+    assert.equal(codexConfig.tts.provider, 'local');
   } finally {
     if (originalClient === undefined) {
       delete process.env.ECHOCODING_CLIENT;

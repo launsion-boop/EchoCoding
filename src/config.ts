@@ -14,8 +14,13 @@ export type EchoClientId = 'default' | 'claude' | 'codex';
 type ScopedClientId = Exclude<EchoClientId, 'default'>;
 
 interface ClientModeOverrides {
+  enabled?: boolean;
+  volume?: number;
   mode?: EchoConfig['mode'];
   voiceLevel?: VoiceLevel;
+  ttsEnabled?: boolean;
+  sfxEnabled?: boolean;
+  sfxVolume?: number;
 }
 
 interface EchoConfigFile extends EchoConfig {
@@ -149,7 +154,7 @@ export function ensureConfigDir(): void {
 export function getConfig(): EchoConfig {
   const merged = loadMergedConfig();
   const clientId = getRuntimeClientId();
-  const withOverrides = applyClientModeOverrides(merged, clientId);
+  const withOverrides = applyClientRuntimeOverrides(merged, clientId);
   const { clients: _clients, ...effectiveConfig } = withOverrides;
   return effectiveConfig;
 }
@@ -164,16 +169,14 @@ export function saveConfig(config: EchoConfig): void {
   ) as unknown as EchoConfigFile;
 
   if (clientId !== 'default') {
-    next.mode = baseline.mode;
-    next.voiceLevel = baseline.voiceLevel;
+    resetGlobalRuntimeFields(next, baseline);
     next.clients = {
       ...(baseline.clients ?? {}),
       ...(next.clients ?? {}),
       [clientId]: {
         ...(baseline.clients?.[clientId] ?? {}),
         ...(next.clients?.[clientId] ?? {}),
-        mode: config.mode,
-        voiceLevel: config.voiceLevel,
+        ...captureClientRuntimeOverrides(config),
       },
     };
   }
@@ -323,15 +326,56 @@ function loadConfigFile(): Partial<EchoConfigFile> {
   }
 }
 
-function applyClientModeOverrides(config: EchoConfigFile, clientId: EchoClientId): EchoConfigFile {
+function applyClientRuntimeOverrides(config: EchoConfigFile, clientId: EchoClientId): EchoConfigFile {
   if (clientId === 'default') return config;
   const override = config.clients?.[clientId];
   if (!override) return config;
 
+  const next: EchoConfigFile = { ...config };
+
+  if (override.enabled !== undefined) next.enabled = override.enabled;
+  if (override.volume !== undefined) next.volume = override.volume;
+  if (override.mode !== undefined) next.mode = override.mode;
+  if (override.voiceLevel !== undefined) next.voiceLevel = override.voiceLevel;
+  if (override.ttsEnabled !== undefined) {
+    next.tts = { ...next.tts, enabled: override.ttsEnabled };
+  }
+  if (override.sfxEnabled !== undefined || override.sfxVolume !== undefined) {
+    next.sfx = {
+      ...next.sfx,
+      ...(override.sfxEnabled !== undefined ? { enabled: override.sfxEnabled } : {}),
+      ...(override.sfxVolume !== undefined ? { volume: override.sfxVolume } : {}),
+    };
+  }
+
+  return next;
+}
+
+function resetGlobalRuntimeFields(next: EchoConfigFile, baseline: EchoConfigFile): void {
+  next.enabled = baseline.enabled;
+  next.volume = baseline.volume;
+  next.mode = baseline.mode;
+  next.voiceLevel = baseline.voiceLevel;
+  next.tts = {
+    ...next.tts,
+    enabled: baseline.tts.enabled,
+  };
+  next.sfx = {
+    ...next.sfx,
+    enabled: baseline.sfx.enabled,
+    volume: baseline.sfx.volume,
+  };
+}
+
+function captureClientRuntimeOverrides(config: EchoConfig): ClientModeOverrides {
   return {
-    ...config,
-    mode: override.mode ?? config.mode,
-    voiceLevel: override.voiceLevel ?? config.voiceLevel,
+    enabled: config.enabled,
+    volume: config.volume,
+    mode: config.mode,
+    voiceLevel: config.voiceLevel,
+    ttsEnabled: config.tts.enabled,
+    sfxEnabled: config.sfx.enabled,
+    sfxVolume: config.sfx.volume,
   };
 }
 
