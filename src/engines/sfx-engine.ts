@@ -158,6 +158,21 @@ export function playAudioFileAsync(filePath: string, volume?: number): Promise<v
   });
 }
 
+/**
+ * Play an SFX for ambient loops — bypasses throttle since ambient is intentionally looping.
+ * Do NOT use for one-shot SFX (use playSfx instead).
+ */
+export function playSfxAmbient(name: string): void {
+  const config = getConfig();
+  if (!config.sfx.enabled || config.mode === 'mute' || config.mode === 'voice-only') {
+    return;
+  }
+  const soundFile = resolveSoundFile(name);
+  if (!soundFile) return;
+  const volume = Math.round((config.volume / 100) * (config.sfx.volume / 100) * 100);
+  playAudioFile(soundFile, volume);
+}
+
 export function listAvailableSfx(): string[] {
   const soundsDir = getSoundsDir();
   const results: string[] = [];
