@@ -318,7 +318,7 @@
     </div>
 
     <div class="preview-input-row">
-      <input type="text" id="previewText" value="你好，我是你的编程助手，很高兴认识你" placeholder="Preview text...">
+      <input type="text" id="previewText" value="Hello, I'm your coding assistant. Nice to meet you." placeholder="Preview text...">
     </div>
 
     <!-- Local voices section -->
@@ -402,6 +402,34 @@
     { name: 'delete', icon: '🗑️' },
   ];
 
+  const PREVIEW_TEXT_DEFAULTS = {
+    zh: '你好，我是你的编程助手，很高兴认识你',
+    en: "Hello, I'm your coding assistant. Nice to meet you.",
+  };
+
+  function getBrowserLocale() {
+    return String(navigator.language || 'en').toLowerCase();
+  }
+
+  function resolvePreviewLanguage(lang) {
+    if (lang === 'zh' || lang === 'en') return lang;
+    return getBrowserLocale().startsWith('zh') ? 'zh' : 'en';
+  }
+
+  function getDefaultPreviewText(lang) {
+    return PREVIEW_TEXT_DEFAULTS[resolvePreviewLanguage(lang)];
+  }
+
+  function syncPreviewTextWithLanguage(lang) {
+    const input = document.getElementById('previewText');
+    if (!input) return;
+    const current = (input.value || '').trim();
+    const defaults = Object.values(PREVIEW_TEXT_DEFAULTS);
+    if (!current || defaults.includes(current)) {
+      input.value = getDefaultPreviewText(lang);
+    }
+  }
+
   // --- API helpers ---
   async function api(path, opts = {}) {
     const res = await fetch(path, opts);
@@ -427,6 +455,7 @@
     speakers = speakerData.speakers;
     currentVoice = speakerData.currentVoice;
     config = configData;
+    syncPreviewTextWithLanguage(config.tts?.language);
 
     // Status
     const daemonOn = statusData.daemon.running;
@@ -518,7 +547,7 @@
 
     setLoading(true);
     try {
-      const text = document.getElementById('previewText').value || '你好，我是你的编程助手';
+      const text = document.getElementById('previewText').value || getDefaultPreviewText(config.tts?.language);
       const speed = config.tts?.speed || 1.0;
       const res = await api('/api/preview/tts', {
         method: 'POST',
@@ -721,6 +750,9 @@
     });
     // Refresh config
     config = await api('/api/config');
+    if (key === 'tts.language') {
+      syncPreviewTextWithLanguage(config.tts?.language);
+    }
   }
 
   async function toggleSetting(key, el) {
@@ -815,7 +847,7 @@
 
     setLoading(true);
     try {
-      const text = document.getElementById('previewText').value || '你好，我是你的编程助手';
+      const text = document.getElementById('previewText').value || getDefaultPreviewText(config.tts?.language);
       const speed = config.tts?.speed || 1.0;
       const res = await fetch('/api/preview/cloud-tts', {
         method: 'POST',
