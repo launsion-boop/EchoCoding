@@ -14,6 +14,8 @@ const CODEIUM_MCP_PATH = path.join(CODEIUM_DIR, 'mcp_config.json');
 
 const WINDSURF_RULES_DIR = path.join(WINDSURF_DIR, 'rules');
 const CODEIUM_RULES_DIR = path.join(CODEIUM_DIR, 'rules');
+const WINDSURF_RULES_PATH = path.join(WINDSURF_RULES_DIR, 'echocoding.md');
+const CODEIUM_RULES_PATH = path.join(CODEIUM_RULES_DIR, 'echocoding.md');
 
 function getActiveDir(): string | null {
   if (fs.existsSync(WINDSURF_DIR)) return WINDSURF_DIR;
@@ -48,6 +50,21 @@ function getMcpServerEntry(): { command: string; args: string[] } {
   };
 }
 
+function hasEchocodingMcpConfig(configPath: string): boolean {
+  if (!fs.existsSync(configPath)) return false;
+  try {
+    const parsed = parseJsonSafe(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+    const mcpServers = parsed.mcpServers;
+    return !!mcpServers && typeof mcpServers === 'object' && 'echocoding' in mcpServers;
+  } catch {
+    return false;
+  }
+}
+
+function hasEchocodingRules(): boolean {
+  return fs.existsSync(WINDSURF_RULES_PATH) || fs.existsSync(CODEIUM_RULES_PATH);
+}
+
 export const windsurfAdapter: ClientAdapter = {
   id: 'windsurf',
   name: 'Windsurf',
@@ -59,6 +76,10 @@ export const windsurfAdapter: ClientAdapter = {
     const detection: AdapterDetection = { installed };
     if (installed) {
       detection.configPath = getMcpConfigPath() ?? undefined;
+      detection.integrated = (
+        hasEchocodingMcpConfig(WINDSURF_MCP_PATH) ||
+        hasEchocodingMcpConfig(CODEIUM_MCP_PATH)
+      ) && hasEchocodingRules();
     }
     return detection;
   },

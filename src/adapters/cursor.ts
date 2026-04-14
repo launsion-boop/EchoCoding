@@ -17,6 +17,21 @@ function getMcpServerEntry(): { command: string; args: string[] } {
   };
 }
 
+function hasEchocodingMcpConfig(configPath = MCP_CONFIG_PATH): boolean {
+  if (!fs.existsSync(configPath)) return false;
+  try {
+    const parsed = parseJsonSafe(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+    const mcpServers = parsed.mcpServers;
+    return !!mcpServers && typeof mcpServers === 'object' && 'echocoding' in mcpServers;
+  } catch {
+    return false;
+  }
+}
+
+function hasEchocodingRules(): boolean {
+  return fs.existsSync(RULES_PATH);
+}
+
 export const cursorAdapter: ClientAdapter = {
   id: 'cursor',
   name: 'Cursor',
@@ -27,6 +42,7 @@ export const cursorAdapter: ClientAdapter = {
     const detection: AdapterDetection = { installed };
     if (installed) {
       detection.configPath = MCP_CONFIG_PATH;
+      detection.integrated = hasEchocodingMcpConfig() && hasEchocodingRules();
     }
     return detection;
   },
