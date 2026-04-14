@@ -47,8 +47,8 @@ esac
 case "$LEVEL" in
   balanced)
     emit_reminder \
-      "<user-prompt-submit-hook>💡 平衡模式：评估本次回复是否需要语音播报。如果有重要信息、阶段性结论或需要用户关注的内容，建议先 echocoding say 一句摘要。纯工具调用或简短确认可以不说。</user-prompt-submit-hook>" \
-      "EchoCoding 平衡模式已开启：如果这次回复有重要信息、阶段性结论或需要用户注意的内容，请先执行 \`echocoding say\` 用一句话播报，再输出完整文字。"
+      "<user-prompt-submit-hook>💡 平衡模式：评估本次回复是否需要语音播报。如果有重要信息、阶段性结论或需要用户关注的内容，建议先 echocoding say 一句摘要。纯工具调用或简短确认可以不说。⚠️ 如果需要反问用户或请求确认，必须用 echocoding ask，不能用文字提问。</user-prompt-submit-hook>" \
+      "EchoCoding 平衡模式已开启：如果这次回复有重要信息、阶段性结论或需要用户注意的内容，请先执行 \`echocoding say\` 用一句话播报，再输出完整文字。⚠️ 需要反问用户时，必须用 \`echocoding ask\`。"
     ;;
   verbose)
     emit_reminder \

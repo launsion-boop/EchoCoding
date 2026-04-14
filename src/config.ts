@@ -166,7 +166,7 @@ function createDefaultConfig(env: NodeJS.ProcessEnv = process.env): EchoConfig {
         apiKey: '',
         appId: '',
       },
-      timeout: 60,
+      timeout: 90,
     },
     sfx: {
       enabled: true,

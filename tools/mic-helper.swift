@@ -173,9 +173,24 @@ class Recorder: NSObject {
     }
 }
 
+// MARK: - Debug log (file-based since stdout/stderr are lost when launched via `open`)
+
+func debugLog(_ msg: String) {
+    let logPath = "/tmp/mic-helper-debug.log"
+    let line = "\(Date()): \(msg)\n"
+    if let fh = FileHandle(forWritingAtPath: logPath) {
+        fh.seekToEndOfFile()
+        fh.write(line.data(using: .utf8)!)
+        fh.closeFile()
+    } else {
+        try? line.write(toFile: logPath, atomically: true, encoding: .utf8)
+    }
+}
+
 // MARK: - Main
 
-let args = CommandLine.arguments.dropFirst()
+// Filter out macOS Launch Services -psn_N_NNNN args injected by `open`
+let args = CommandLine.arguments.dropFirst().filter { !$0.hasPrefix("-psn_") }
 guard let command = args.first else {
     fputs("Usage: mic-helper <check|authorize|record> [args...]\n", stderr)
     exit(2)
@@ -203,24 +218,33 @@ case "authorize":
 
 case "record":
     let argList = Array(args)
+    debugLog("record: args=\(argList)")
     guard argList.count >= 3,
           let seconds = Double(argList[1])
     else {
+        debugLog("record: bad args, count=\(argList.count)")
         fputs("Usage: mic-helper record <seconds> <output.wav>\n", stderr)
         exit(2)
     }
     let outPath = argList[2]
+    debugLog("record: seconds=\(seconds) path=\(outPath)")
 
     if !checkPermission() {
+        debugLog("record: permission not granted, requesting...")
         let ok = requestPermissionWithRunLoop()
+        debugLog("record: permission result=\(ok)")
         if !ok {
             fputs("Microphone permission denied\n", stderr)
             exit(1)
         }
+    } else {
+        debugLog("record: permission already granted")
     }
 
     let recorder = Recorder()
+    debugLog("record: starting recording")
     let ok = recorder.record(seconds: seconds, outputPath: outPath)
+    debugLog("record: finished ok=\(ok)")
     exit(ok ? 0 : 1)
 
 default:

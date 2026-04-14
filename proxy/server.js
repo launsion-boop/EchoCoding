@@ -139,11 +139,11 @@ async function volcAsr(audioBase64, format, language) {
   const configPayload = JSON.stringify({
     user: { uid: 'echocoding-proxy' },
     audio: {
-      format: format === 'webm' ? 'ogg_opus' : format,
+      format: format === 'webm' ? 'ogg' : format,
       rate: 16000,
       bits: 16,
       channel: 1,
-      codec: 'raw',
+      codec: (format === 'ogg' || format === 'webm') ? 'opus' : 'raw',
     },
     request: {
       model_name: 'bigmodel',

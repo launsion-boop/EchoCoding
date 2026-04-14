@@ -333,11 +333,14 @@ async function listenCloud(timeoutSec: number): Promise<string> {
     throw new Error('Cloud ASR endpoint not configured');
   }
 
-  // Record audio first
+  // Record audio with heartbeat indicator
   playSfx('mic-ready');
   await new Promise((r) => setTimeout(r, 300));
 
+  // Play fast heartbeat while mic is open (every 1.2s) to indicate listening
+  const heartbeatInterval = setInterval(() => playSfx('heartbeat'), 1200);
   const audioFile = await recordMicrophone(timeoutSec);
+  clearInterval(heartbeatInterval);
   if (!audioFile) {
     if (lastRecordError) {
       throw new Error(lastRecordError);
@@ -345,25 +348,23 @@ async function listenCloud(timeoutSec: number): Promise<string> {
     return '[timeout]';
   }
 
-  let normalizedFile: string | null = null;
+  let normalized: NormalizedAudio | null = null;
   try {
-    normalizedFile = normalizeWavForCloud(audioFile);
-    const audioData = fs.readFileSync(normalizedFile);
+    normalized = normalizeAudioForCloud(audioFile);
+    const audioData = fs.readFileSync(normalized.file);
     const audioBase64 = audioData.toString('base64');
 
     // Detect if endpoint is Volcengine direct or our proxy
     const isVolcDirect = endpoint.includes('openspeech.bytedance.com');
 
     if (isVolcDirect) {
-      // Direct Volcengine: send base64 audio via their format
       return await callVolcengineAsr(audioBase64, config, apiKey);
     } else {
-      // Our proxy: simplified request
-      return await callProxyAsr(audioBase64, endpoint);
+      return await callProxyAsr(audioBase64, endpoint, normalized.format);
     }
   } finally {
-    if (normalizedFile && normalizedFile !== audioFile) {
-      try { fs.unlinkSync(normalizedFile); } catch { /* ignore */ }
+    if (normalized && normalized.file !== audioFile) {
+      try { fs.unlinkSync(normalized.file); } catch { /* ignore */ }
     }
     try { fs.unlinkSync(audioFile); } catch { /* ignore */ }
   }
@@ -434,10 +435,10 @@ async function callVolcengineAsr(
  * Call our proxy (api.echoclaw.com/v1/asr).
  * Proxy holds the Volcengine key — client sends base64 audio.
  */
-async function callProxyAsr(audioBase64: string, endpoint: string): Promise<string> {
+async function callProxyAsr(audioBase64: string, endpoint: string, format: 'ogg' | 'wav' = 'wav'): Promise<string> {
   const bodyStr = JSON.stringify({
     audio: audioBase64,
-    format: 'wav',
+    format,
     language: 'zh-CN',
   });
   const authHeaders = signRequest(bodyStr, 'POST', resolveEndpointPath(endpoint, '/v1/asr'));
@@ -477,31 +478,27 @@ export function disposeAsr(): void {
   vad = null;
 }
 
-function normalizeWavForCloud(inputFile: string): string {
-  const normalized = path.join(TEMP_DIR, `rec-normalized-${Date.now()}.wav`);
+interface NormalizedAudio {
+  file: string;
+  format: 'ogg' | 'wav';
+}
+
+function normalizeAudioForCloud(inputFile: string): NormalizedAudio {
+  // V3 BigASR only supports wav/pcm — normalize to standard 16kHz mono PCM WAV
+  const wavFile = path.join(TEMP_DIR, `rec-normalized-${Date.now()}.wav`);
   try {
     execFileSync(
       'sox',
-      [
-        inputFile,
-        '-t', 'wav',
-        '-e', 'signed-integer',
-        '-b', '16',
-        '-r', '16000',
-        '-c', '1',
-        normalized,
-      ],
+      [inputFile, '-t', 'wav', '-e', 'signed-integer', '-b', '16', '-r', '16000', '-c', '1', wavFile],
       { stdio: 'ignore', timeout: 8_000 },
     );
-    if (fs.existsSync(normalized) && fs.statSync(normalized).size > 44) {
-      return normalized;
+    if (fs.existsSync(wavFile) && fs.statSync(wavFile).size > 44) {
+      return { file: wavFile, format: 'wav' };
     }
-  } catch {
-    // If conversion fails, keep original file.
-  }
+  } catch { /* keep original */ }
+  try { fs.unlinkSync(wavFile); } catch { /* ignore */ }
 
-  try { fs.unlinkSync(normalized); } catch { /* ignore */ }
-  return inputFile;
+  return { file: inputFile, format: 'wav' };
 }
 
 function resolveEndpointPath(endpoint: string, fallback: string): string {
