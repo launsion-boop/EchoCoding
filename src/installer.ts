@@ -272,6 +272,11 @@ function getCodexVoiceReminderCommand(): string {
   return `ECHOCODING_HOOK_CLIENT=codex ECHOCODING_CLIENT=codex bash ${shellQuote(script)}`;
 }
 
+function getCodexHookCommand(): string {
+  const hookScript = path.join(getPackageRoot(), 'dist', 'bin', 'echocoding-hook.js');
+  return `ECHOCODING_CLIENT=codex ${shellQuote(process.execPath)} ${shellQuote(hookScript)}`;
+}
+
 function getCodexAutoStartCommand(): string {
   const script = path.join(getPackageRoot(), 'scripts', 'auto-start.sh');
   return `ECHOCODING_CLIENT=codex ECHOCODING_NODE=${shellQuote(process.execPath)} bash ${shellQuote(script)}`;
@@ -488,6 +493,36 @@ function readCodexHooksFile(): CodexHooksFile {
 function upsertCodexHooks(config: CodexHooksFile): CodexHooksFile {
   const next: CodexHooksFile = { ...config, hooks: { ...(config.hooks ?? {}) } };
 
+  upsertCodexHookGroup(next.hooks!, 'SessionStart', 'echocoding-hook', {
+    matcher: 'startup|resume',
+    hooks: [
+      {
+        type: 'command',
+        command: getCodexHookCommand(),
+      },
+    ],
+  });
+
+  upsertCodexHookGroup(next.hooks!, 'UserPromptSubmit', 'echocoding-hook', {
+    hooks: [
+      {
+        type: 'command',
+        command: getCodexHookCommand(),
+      },
+    ],
+  });
+
+  for (const eventName of ['PreToolUse', 'PostToolUse', 'Notification', 'Stop', 'SubagentStart', 'SubagentStop', 'PreCompact']) {
+    upsertCodexHookGroup(next.hooks!, eventName, 'echocoding-hook', {
+      hooks: [
+        {
+          type: 'command',
+          command: getCodexHookCommand(),
+        },
+      ],
+    });
+  }
+
   upsertCodexHookGroup(next.hooks!, 'SessionStart', 'auto-start', {
     matcher: 'startup|resume',
     hooks: [
@@ -522,6 +557,7 @@ function removeCodexHooks(config: CodexHooksFile): CodexHooksFile {
         ...group,
         hooks: group.hooks.filter(
           (hook) =>
+            !hook.command.includes('echocoding-hook') &&
             !hook.command.includes('voice-reminder') &&
             !hook.command.includes('auto-start'),
         ),

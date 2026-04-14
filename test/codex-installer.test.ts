@@ -77,16 +77,41 @@ test('installCodex writes a Codex skill directory and migrates legacy instructio
   const hooks = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
   assert.equal(Array.isArray(hooks.hooks?.SessionStart), true);
   assert.equal(Array.isArray(hooks.hooks?.UserPromptSubmit), true);
+  assert.equal(Array.isArray(hooks.hooks?.PreToolUse), true);
+  assert.equal(Array.isArray(hooks.hooks?.PostToolUse), true);
+  assert.equal(Array.isArray(hooks.hooks?.Notification), true);
+  assert.equal(Array.isArray(hooks.hooks?.Stop), true);
+  assert.equal(Array.isArray(hooks.hooks?.SubagentStart), true);
+  assert.equal(Array.isArray(hooks.hooks?.SubagentStop), true);
+  assert.equal(Array.isArray(hooks.hooks?.PreCompact), true);
   assert.match(
-    hooks.hooks.SessionStart[0].hooks[0].command,
+    hooks.hooks.SessionStart[0].hooks[0].command + hooks.hooks.SessionStart[1].hooks[0].command,
+    /echocoding-hook/,
+  );
+  assert.match(
+    hooks.hooks.SessionStart[0].hooks[0].command + hooks.hooks.SessionStart[1].hooks[0].command,
     /ECHOCODING_CLIENT=codex .*auto-start\.sh/,
   );
+  assert.match(
+    hooks.hooks.PreToolUse[0].hooks[0].command,
+    /ECHOCODING_CLIENT=codex .*echocoding-hook\.js/,
+  );
+  assert.match(
+    hooks.hooks.PostToolUse[0].hooks[0].command,
+    /ECHOCODING_CLIENT=codex .*echocoding-hook\.js/,
+  );
   assert.equal(
-    hooks.hooks.SessionStart[0].hooks[0].statusMessage,
+    hooks.hooks.SessionStart.find((g: { hooks: Array<{ command?: string; statusMessage?: string }> }) =>
+      g.hooks.some((h) => h.command?.includes('auto-start')),
+    ).hooks[0].statusMessage,
     'Starting EchoCoding daemon',
   );
   assert.match(
-    hooks.hooks.UserPromptSubmit[0].hooks[0].command,
+    hooks.hooks.UserPromptSubmit.map((g: { hooks: Array<{ command?: string }> }) => g.hooks[0].command).join('\n'),
+    /echocoding-hook/,
+  );
+  assert.match(
+    hooks.hooks.UserPromptSubmit.map((g: { hooks: Array<{ command?: string }> }) => g.hooks[0].command).join('\n'),
     /ECHOCODING_HOOK_CLIENT=codex ECHOCODING_CLIENT=codex .*voice-reminder\.sh/,
   );
 });
@@ -147,9 +172,15 @@ test('installCodex is idempotent and uninstallCodex removes managed artifacts wh
   assert.match(configAfterInstall, /\[features\][\s\S]*fast_mode = true/);
 
   const hooksAfterInstall = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
-  assert.equal(hooksAfterInstall.hooks.Stop.length, 1);
-  assert.equal(hooksAfterInstall.hooks.SessionStart.length, 1);
-  assert.equal(hooksAfterInstall.hooks.UserPromptSubmit.length, 1);
+  assert.equal(hooksAfterInstall.hooks.Stop.length >= 2, true);
+  assert.equal(hooksAfterInstall.hooks.SessionStart.length >= 2, true);
+  assert.equal(hooksAfterInstall.hooks.UserPromptSubmit.length >= 2, true);
+  assert.equal(Array.isArray(hooksAfterInstall.hooks.PreToolUse), true);
+  assert.equal(Array.isArray(hooksAfterInstall.hooks.PostToolUse), true);
+  assert.equal(Array.isArray(hooksAfterInstall.hooks.Notification), true);
+  assert.equal(Array.isArray(hooksAfterInstall.hooks.SubagentStart), true);
+  assert.equal(Array.isArray(hooksAfterInstall.hooks.SubagentStop), true);
+  assert.equal(Array.isArray(hooksAfterInstall.hooks.PreCompact), true);
 
   const uninstallResult = uninstallCodex();
   assert.equal(uninstallResult.success, true);
