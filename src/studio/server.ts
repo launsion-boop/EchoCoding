@@ -289,24 +289,29 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   // API: Cloud voices list
   if (pathname === '/api/cloud/voices' && req.method === 'GET') {
     const cloudVoices = [
-      // Chinese Female
-      { id: 'zh_female_shuangkuaisisi_moon_bigtts', label: '爽快思思', lang: 'zh', gender: 'female', recommended: true },
-      { id: 'zh_female_wanwanxiaohe_moon_bigtts', label: '弯弯小何', lang: 'zh', gender: 'female' },
-      { id: 'zh_female_tianmeixiaoyuan_moon_bigtts', label: '甜美小媛', lang: 'zh', gender: 'female', recommended: true },
-      { id: 'zh_female_qingxinnvsheng_moon_bigtts', label: '清新女声', lang: 'zh', gender: 'female' },
-      { id: 'zh_female_sajiaonvyou_moon_bigtts', label: '撒娇女友', lang: 'zh', gender: 'female' },
-      { id: 'zh_female_wenrouxiaoya_moon_bigtts', label: '温柔小雅', lang: 'zh', gender: 'female' },
-      // Chinese Male
-      { id: 'zh_male_chunhou_moon_bigtts', label: '淳厚', lang: 'zh', gender: 'male', recommended: true },
-      { id: 'zh_male_yangguangqingnian_moon_bigtts', label: '阳光青年', lang: 'zh', gender: 'male' },
-      { id: 'zh_male_yuanqinanhai_moon_bigtts', label: '元气男孩', lang: 'zh', gender: 'male' },
-      { id: 'zh_male_aojiaobazong_moon_bigtts', label: '傲娇霸总', lang: 'zh', gender: 'male', recommended: true },
-      // English Female
-      { id: 'en_female_sarah_moon_bigtts', label: 'Sarah', lang: 'en', gender: 'female', recommended: true },
-      { id: 'en_female_anna_moon_bigtts', label: 'Anna', lang: 'en', gender: 'female' },
-      // English Male
-      { id: 'en_male_adam_moon_bigtts', label: 'Adam', lang: 'en', gender: 'male', recommended: true },
-      { id: 'en_male_bob_moon_bigtts', label: 'Bob', lang: 'en', gender: 'male' },
+      // Chinese Female — General
+      { id: 'BV700_streaming', label: '灿灿', lang: 'zh', gender: 'female', recommended: true },
+      { id: 'BV406_streaming', label: '梓梓', lang: 'zh', gender: 'female' },
+      { id: 'BV405_streaming', label: '甜美小源', lang: 'zh', gender: 'female', recommended: true },
+      { id: 'BV007_streaming', label: '亲切女声', lang: 'zh', gender: 'female' },
+      { id: 'BV009_streaming', label: '知性女声', lang: 'zh', gender: 'female' },
+      { id: 'BV001_streaming', label: '通用女声', lang: 'zh', gender: 'female' },
+      { id: 'BV104_streaming', label: '温柔淑女', lang: 'zh', gender: 'female' },
+      { id: 'BV428_streaming', label: '清新文艺女声', lang: 'zh', gender: 'female' },
+      { id: 'BV005_streaming', label: '活泼女声', lang: 'zh', gender: 'female' },
+      // Chinese Male — General
+      { id: 'BV701_streaming', label: '擎苍', lang: 'zh', gender: 'male', recommended: true },
+      { id: 'BV407_streaming', label: '燃燃', lang: 'zh', gender: 'male' },
+      { id: 'BV705_streaming', label: '炀炀', lang: 'zh', gender: 'male' },
+      { id: 'BV002_streaming', label: '通用男声', lang: 'zh', gender: 'male' },
+      { id: 'BV008_streaming', label: '亲切男声', lang: 'zh', gender: 'male', recommended: true },
+      { id: 'BV123_streaming', label: '阳光青年', lang: 'zh', gender: 'male' },
+      { id: 'BV004_streaming', label: '开朗青年', lang: 'zh', gender: 'male' },
+      { id: 'BV102_streaming', label: '儒雅青年', lang: 'zh', gender: 'male' },
+      { id: 'BV006_streaming', label: '磁性男声', lang: 'zh', gender: 'male' },
+      // Special
+      { id: 'BV034_streaming', label: '知性姐姐', lang: 'zh', gender: 'female' },
+      { id: 'BV033_streaming', label: '温柔小哥', lang: 'zh', gender: 'male' },
     ];
 
     const config = getConfig();

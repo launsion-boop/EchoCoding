@@ -105,8 +105,8 @@
   /* Speaker grid */
   .speaker-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-    gap: 10px;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 8px;
   }
   .speaker-card {
     background: var(--surface);
@@ -151,6 +151,22 @@
   .btn-sm:hover { border-color: var(--accent); color: var(--text); }
   .btn-sm.primary { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
   .btn-sm.primary:hover { background: var(--accent); color: #fff; }
+
+  /* Play button for voice cards */
+  .play-btn {
+    width: 32px; height: 32px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-dim);
+    font-size: 14px;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: all 0.15s;
+    flex-shrink: 0;
+  }
+  .play-btn:hover { border-color: var(--accent); color: var(--accent); background: var(--surface-hover); }
+  .speaker-card.playing .play-btn { border-color: var(--green); color: var(--green); }
 
   .show-all-btn {
     display: block;
@@ -455,20 +471,22 @@
       showAllBtn.style.display = 'none';
     }
 
-    grid.innerHTML = filtered.map(s => `
-      <div class="speaker-card ${String(s.sid) === String(currentVoice) ? 'active' : ''}" data-sid="${s.sid}">
-        <div class="sid">SID ${s.sid}</div>
-        <div class="label">${s.label}</div>
-        <div class="tags">
-          <span class="tag tag-${s.lang}">${s.lang.toUpperCase()}</span>
-          <span class="tag tag-${s.gender}">${s.gender}</span>
+    grid.innerHTML = filtered.map(s => {
+      const isActive = String(s.sid) === String(currentVoice);
+      return `
+      <div class="speaker-card ${isActive ? 'active' : ''}" data-sid="${s.sid}" style="display:flex;align-items:center;gap:10px;padding:10px 14px">
+        <button class="play-btn" onclick="previewVoice(${s.sid}, event)" title="Preview">&#9654;</button>
+        <div style="flex:1;min-width:0">
+          <div class="label" style="margin:0">${s.label}</div>
+          <div class="tags" style="margin-top:3px">
+            <span class="tag tag-${s.lang}">${s.lang.toUpperCase()}</span>
+            <span class="tag tag-${s.gender}">${s.gender}</span>
+            <span class="sid" style="margin-left:4px">SID ${s.sid}</span>
+          </div>
         </div>
-        <div class="actions">
-          <button class="btn-sm" onclick="previewVoice(${s.sid}, event)">Play</button>
-          <button class="btn-sm primary" onclick="setVoice(${s.sid}, event)">Use This</button>
-        </div>
-      </div>
-    `).join('');
+        <div class="toggle ${isActive ? 'on' : ''}" onclick="setVoice(${s.sid}, event)"></div>
+      </div>`;
+    }).join('');
   }
 
   function setupFilterTabs() {
@@ -735,15 +753,8 @@
       renderCloudVoices();
     }
 
-    // Re-render settings to match provider tab
+    // Re-render settings to match provider tab (view only — does NOT change config)
     renderSettings();
-
-    // Save provider preference
-    await api('/api/provider', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ provider }),
-    });
   }
 
   async function loadCloudVoices() {
@@ -776,21 +787,22 @@
   function renderCloudVoices() {
     const grid = document.getElementById('cloudSpeakerGrid');
     const filtered = getFilteredCloudVoices();
-    grid.innerHTML = filtered.map(v => `
-      <div class="speaker-card ${v.id === String(currentVoice) ? 'active' : ''}" data-cloud-id="${v.id}">
-        <div class="sid" style="font-size:11px;word-break:break-all">${v.id.split('_').slice(0,3).join(' ')}</div>
-        <div class="label">${v.label}</div>
-        <div class="tags">
-          <span class="tag tag-${v.lang}">${v.lang.toUpperCase()}</span>
-          <span class="tag tag-${v.gender}">${v.gender}</span>
-          ${v.recommended ? '<span class="tag" style="background:#2a2a1a;color:var(--orange)">star</span>' : ''}
+    grid.innerHTML = filtered.map(v => {
+      const isActive = v.id === String(currentVoice);
+      return `
+      <div class="speaker-card ${isActive ? 'active' : ''}" data-cloud-id="${v.id}" style="display:flex;align-items:center;gap:10px;padding:10px 14px">
+        <button class="play-btn" onclick="previewCloudVoice('${v.id}', event)" title="Preview">&#9654;</button>
+        <div style="flex:1;min-width:0">
+          <div class="label" style="margin:0">${v.label}</div>
+          <div class="tags" style="margin-top:3px">
+            <span class="tag tag-${v.lang}">${v.lang.toUpperCase()}</span>
+            <span class="tag tag-${v.gender}">${v.gender}</span>
+            ${v.recommended ? '<span class="tag" style="background:#2a2a1a;color:var(--orange)">star</span>' : ''}
+          </div>
         </div>
-        <div class="actions">
-          <button class="btn-sm" onclick="previewCloudVoice('${v.id}', event)">Play</button>
-          <button class="btn-sm primary" onclick="setCloudVoice('${v.id}', event)">Use This</button>
-        </div>
-      </div>
-    `).join('');
+        <div class="toggle ${isActive ? 'on' : ''}" onclick="setCloudVoice('${v.id}', event)"></div>
+      </div>`;
+    }).join('');
   }
 
   async function previewCloudVoice(voiceId, e) {

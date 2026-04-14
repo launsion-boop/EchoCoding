@@ -334,8 +334,8 @@ async function callProxyTts(
  * Volcengine has many voices — map our presets to their IDs.
  */
 function resolveVolcVoice(voice: string, text: string): string {
-  // If voice looks like a Volcengine voice_type ID, use directly
-  if (voice.includes('_') && voice.length > 10) {
+  // If voice looks like a Volcengine voice_type ID (BVxxx_streaming or old format), use directly
+  if (voice.startsWith('BV') || voice.startsWith('BR') || (voice.includes('_') && voice.length > 10)) {
     return voice;
   }
 
@@ -343,11 +343,11 @@ function resolveVolcVoice(voice: string, text: string): string {
   const isChinese = containsChinese(text);
 
   const VOLC_VOICES: Record<string, string> = {
-    'zh-female': 'zh_female_shuangkuaisisi_moon_bigtts',
-    'zh-male': 'zh_male_chunhou_moon_bigtts',
-    'en-female': 'en_female_sarah_moon_bigtts',
-    'en-male': 'en_male_adam_moon_bigtts',
-    'default': isChinese ? 'zh_female_shuangkuaisisi_moon_bigtts' : 'en_female_sarah_moon_bigtts',
+    'zh-female': 'BV700_streaming',     // 灿灿
+    'zh-male': 'BV701_streaming',       // 擎苍
+    'en-female': 'BV001_streaming',     // 通用女声 (supports English)
+    'en-male': 'BV002_streaming',       // 通用男声
+    'default': isChinese ? 'BV700_streaming' : 'BV001_streaming',
   };
 
   return VOLC_VOICES[voice] || VOLC_VOICES['default'];

@@ -111,7 +111,8 @@ async function volcTts(text, voiceType, speed) {
   });
 
   if (!response.ok) {
-    throw new Error(`Volcengine TTS HTTP ${response.status}`);
+    const errBody = await response.text().catch(() => '');
+    throw new Error(`Volcengine TTS HTTP ${response.status} voice=${voiceType} ${errBody.slice(0, 100)}`);
   }
 
   const result = await response.json();
@@ -328,8 +329,8 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      // voice_type whitelist: only allow known Volcengine voice IDs or empty (default)
-      const ALLOWED_VOICE_PATTERN = /^[a-z]{2}_(?:fe)?male_[a-z0-9_]+$/;
+      // voice_type whitelist: BVxxx_streaming format or legacy zh_xxx format
+      const ALLOWED_VOICE_PATTERN = /^(BV|BR)\d+(_V\d+)?_streaming$|^[a-z]{2}_(?:fe)?male_[a-z0-9_]+$/;
       if (voiceType && !ALLOWED_VOICE_PATTERN.test(voiceType)) {
         sendJson(res, 400, { error: 'Invalid voice_type format' });
         return;
