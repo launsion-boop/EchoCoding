@@ -18,6 +18,10 @@ import { createRequire } from 'node:module';
 const _require = createRequire(import.meta.url);
 
 const TEMP_DIR = path.join(os.tmpdir(), 'echocoding-studio');
+const STUDIO_PREVIEW_TEXT = {
+  zh: '你好，我是你的编程助手，很高兴认识你',
+  en: "Hello, I'm your coding assistant. Nice to meet you.",
+} as const;
 
 // Lazy-loaded sherpa-onnx
 let sherpa: typeof import('sherpa-onnx-node') | null = null;
@@ -192,6 +196,39 @@ function buildSpeakerList(): SpeakerInfo[] {
   return speakers;
 }
 
+function normalizeLocale(raw: string): string {
+  return raw
+    .trim()
+    .split(':')[0]
+    .split('.')[0]
+    .split('@')[0]
+    .replace(/_/g, '-')
+    .toLowerCase();
+}
+
+function detectServerLocale(): string {
+  const envLocale = [process.env.LC_ALL, process.env.LC_MESSAGES, process.env.LANG, process.env.LANGUAGE]
+    .find((value) => typeof value === 'string' && value.trim().length > 0);
+  if (envLocale) return normalizeLocale(envLocale);
+
+  try {
+    const locale = Intl.DateTimeFormat().resolvedOptions().locale;
+    if (locale) return normalizeLocale(locale);
+  } catch {
+    // ignore and use fallback below
+  }
+
+  return 'en';
+}
+
+function getStudioPreviewFallbackText(language: 'zh' | 'en' | 'auto'): string {
+  if (language === 'zh') return STUDIO_PREVIEW_TEXT.zh;
+  if (language === 'en') return STUDIO_PREVIEW_TEXT.en;
+  return detectServerLocale().startsWith('zh')
+    ? STUDIO_PREVIEW_TEXT.zh
+    : STUDIO_PREVIEW_TEXT.en;
+}
+
 // --- HTTP Server ---
 
 function readBody(req: http.IncomingMessage): Promise<string> {
@@ -274,7 +311,8 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   // API: TTS preview — generate audio, return WAV
   if (pathname === '/api/preview/tts' && req.method === 'POST') {
     const body = JSON.parse(await readBody(req));
-    const text = body.text || '你好，我是你的编程助手';
+    const config = getConfig();
+    const text = body.text || getStudioPreviewFallbackText(config.tts.language);
     const sid = typeof body.sid === 'number' ? body.sid : 30;
     const speed = typeof body.speed === 'number' ? body.speed : 1.0;
 
@@ -372,8 +410,8 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   // API: Cloud TTS preview — proxy to Volcengine
   if (pathname === '/api/preview/cloud-tts' && req.method === 'POST') {
     const body = JSON.parse(await readBody(req));
-    const text = body.text || '你好，我是你的编程助手';
     const config = getConfig();
+    const text = body.text || getStudioPreviewFallbackText(config.tts.language);
     const voiceType = body.voice_type || config.tts.voice || 'zh_female_wanwanxiaohe_moon_bigtts';
     const speed = typeof body.speed === 'number' ? body.speed : 1.0;
     const endpoint = config.tts.cloud.endpoint;

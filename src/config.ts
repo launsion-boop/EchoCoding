@@ -87,60 +87,100 @@ export interface EchoConfig {
 const CONFIG_DIR = path.join(os.homedir(), '.echocoding');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.yaml');
 
-const DEFAULT_CONFIG: EchoConfig = {
-  enabled: true,
-  theme: 'default',
-  volume: 70,
-  mode: 'full',
-  voiceLevel: 'balanced',
-  tts: {
+const DEFAULT_ZH_CLOUD_VOICE = 'zh_female_wanwanxiaohe_moon_bigtts';
+const DEFAULT_EN_CLOUD_VOICE = 'BV001_streaming';
+
+function normalizeLocale(raw: string): string {
+  return raw
+    .trim()
+    .split(':')[0]
+    .split('.')[0]
+    .split('@')[0]
+    .replace(/_/g, '-')
+    .toLowerCase();
+}
+
+function detectSystemLocale(env: NodeJS.ProcessEnv = process.env): string {
+  const envLocale = [env.LC_ALL, env.LC_MESSAGES, env.LANG, env.LANGUAGE].find(
+    (value) => typeof value === 'string' && value.trim().length > 0,
+  );
+  if (envLocale) return normalizeLocale(envLocale);
+
+  try {
+    const intlLocale = Intl.DateTimeFormat().resolvedOptions().locale;
+    if (intlLocale) return normalizeLocale(intlLocale);
+  } catch {
+    // ignore — keep fallback
+  }
+
+  return 'en';
+}
+
+function detectDefaultCloudVoice(env: NodeJS.ProcessEnv = process.env): string {
+  return detectSystemLocale(env).startsWith('zh')
+    ? DEFAULT_ZH_CLOUD_VOICE
+    : DEFAULT_EN_CLOUD_VOICE;
+}
+
+function createDefaultConfig(env: NodeJS.ProcessEnv = process.env): EchoConfig {
+  return {
     enabled: true,
-    provider: 'cloud',
-    engine: 'kokoro',
-    local: {
-      modelsDir: path.join(CONFIG_DIR, 'models'),
-      orpheusModel: '150m',
-      kokoroModel: 'kokoro-multi-lang-v1_1',
+    theme: 'default',
+    volume: 70,
+    mode: 'full',
+    voiceLevel: 'balanced',
+    tts: {
+      enabled: true,
+      provider: 'cloud',
+      engine: 'kokoro',
+      local: {
+        modelsDir: path.join(CONFIG_DIR, 'models'),
+        orpheusModel: '150m',
+        kokoroModel: 'kokoro-multi-lang-v1_1',
+      },
+      cloud: {
+        endpoint: 'https://coding.echoclaw.me/v1/tts',
+        apiKey: '',
+        appId: '',
+        stream: true,
+      },
+      // First-run default: Chinese systems use 湾湾小何, others use English female.
+      voice: detectDefaultCloudVoice(env),
+      speed: 1.0,
+      language: 'auto',
+      emotion: true,
+      throttle: {
+        minInterval: 3,
+        dedupWindow: 30,
+      },
     },
-    cloud: {
-      endpoint: 'https://coding.echoclaw.me/v1/tts',
-      apiKey: '',
-      appId: '',
-      stream: true,
+    asr: {
+      enabled: true,
+      provider: 'cloud',
+      engine: 'paraformer',
+      local: {
+        modelsDir: path.join(CONFIG_DIR, 'models'),
+      },
+      cloud: {
+        endpoint: 'https://coding.echoclaw.me/v1/asr',
+        apiKey: '',
+        appId: '',
+      },
+      timeout: 60,
     },
-    voice: 'zh_female_wanwanxiaohe_moon_bigtts',
-    speed: 1.0,
-    language: 'auto',
-    emotion: true,
-    throttle: {
-      minInterval: 3,
-      dedupWindow: 30,
+    sfx: {
+      enabled: true,
+      volume: 80,
     },
-  },
-  asr: {
-    enabled: true,
-    provider: 'cloud',
-    engine: 'paraformer',
-    local: {
-      modelsDir: path.join(CONFIG_DIR, 'models'),
+    daemon: {
+      socketPath: '/tmp/echocoding.sock',
+      logFile: path.join(CONFIG_DIR, 'logs', 'daemon.log'),
+      pidFile: path.join(CONFIG_DIR, 'daemon.pid'),
     },
-    cloud: {
-      endpoint: 'https://coding.echoclaw.me/v1/asr',
-      apiKey: '',
-      appId: '',
-    },
-    timeout: 60,
-  },
-  sfx: {
-    enabled: true,
-    volume: 80,
-  },
-  daemon: {
-    socketPath: '/tmp/echocoding.sock',
-    logFile: path.join(CONFIG_DIR, 'logs', 'daemon.log'),
-    pidFile: path.join(CONFIG_DIR, 'daemon.pid'),
-  },
-};
+  };
+}
+
+const DEFAULT_CONFIG: EchoConfig = createDefaultConfig();
 
 export function getConfigDir(): string {
   return CONFIG_DIR;
