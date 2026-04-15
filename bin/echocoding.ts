@@ -203,6 +203,7 @@ program
         const check = isDaemonRunning();
         if (check.running && await pingDaemon()) {
           console.log(`[echocoding] Daemon started (pid: ${check.pid})`);
+          checkForUpdate(); // fire-and-forget, don't block
           return;
         }
       }
@@ -243,6 +244,7 @@ program
     console.log(`[echocoding] Volume: ${config.volume}`);
     console.log(`[echocoding] TTS: ${config.tts.enabled ? 'enabled' : 'disabled'}`);
     console.log(`[echocoding] SFX: ${config.sfx.enabled ? 'enabled' : 'disabled'}`);
+    await checkForUpdate();
   });
 
 // --- say ---
@@ -473,4 +475,42 @@ program.parse();
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Check npm registry for newer version. Non-blocking, never throws.
+ * Prints a one-line update hint if a newer version is available.
+ */
+async function checkForUpdate(): Promise<void> {
+  try {
+    const pkgPath = path.resolve(__dirname, '..', '..', 'package.json');
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8')) as { version: string };
+    const current = pkg.version;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
+    const resp = await fetch('https://registry.npmjs.org/echocoding/latest', {
+      signal: controller.signal,
+      headers: { Accept: 'application/json' },
+    });
+    clearTimeout(timer);
+
+    if (!resp.ok) return;
+    const data = await resp.json() as { version?: string };
+    const latest = data.version;
+    if (!latest || latest === current) return;
+
+    // Simple semver compare: split and compare numerically
+    const cur = current.split('.').map(Number);
+    const lat = latest.split('.').map(Number);
+    for (let i = 0; i < 3; i++) {
+      if ((lat[i] ?? 0) > (cur[i] ?? 0)) {
+        console.log(`[echocoding] Update available: ${current} → ${latest}. Run: npm update -g echocoding`);
+        return;
+      }
+      if ((lat[i] ?? 0) < (cur[i] ?? 0)) return;
+    }
+  } catch {
+    // Network error, timeout, etc. — silently ignore
+  }
 }
