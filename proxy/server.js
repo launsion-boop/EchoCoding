@@ -21,6 +21,7 @@ import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
+const WS = require('ws');
 
 // --- Config from env ---
 const VOLC_APP_ID = process.env.VOLC_APP_ID || '';
@@ -127,23 +128,29 @@ async function volcTts(text, voiceType, speed) {
   return result.data; // base64 audio
 }
 
-// --- Volcengine ASR via V3 WebSocket (bigmodel_nostream) ---
-// Protocol: binary frames with 4-byte header + 4-byte payload_size + payload
-// Flow: connect → send full_client_request (JSON config) → send audio chunks → send final marker → receive result
+const VOLC_ASR_WS_URL = 'wss://openspeech.bytedance.com/api/v3/sauc/bigmodel';
+const VOLC_ASR_RESOURCE_ID = 'volc.bigasr.sauc.duration';
 
-async function volcAsr(audioBase64, format, language) {
-  const WS = require('ws');
-  const audioBuf = Buffer.from(audioBase64, 'base64');
+function createVolcAsrHeaders() {
+  return {
+    'X-Api-App-Key': VOLC_APP_ID,
+    'X-Api-Access-Key': VOLC_ACCESS_TOKEN,
+    'X-Api-Resource-Id': VOLC_ASR_RESOURCE_ID,
+    'X-Api-Connect-Id': crypto.randomUUID(),
+  };
+}
 
-  // V3 full_client_request payload
-  const configPayload = JSON.stringify({
+function createVolcAsrConfigPayload(format, language) {
+  const normalizedFormat = format === 'webm' ? 'ogg' : format;
+  const codec = (normalizedFormat === 'ogg' || normalizedFormat === 'webm') ? 'opus' : 'raw';
+  return JSON.stringify({
     user: { uid: 'echocoding-proxy' },
     audio: {
-      format: format === 'webm' ? 'ogg' : format,
+      format: normalizedFormat,
       rate: 16000,
       bits: 16,
       channel: 1,
-      codec: (format === 'ogg' || format === 'webm') ? 'opus' : 'raw',
+      codec,
     },
     request: {
       model_name: 'bigmodel',
@@ -153,20 +160,71 @@ async function volcAsr(audioBase64, format, language) {
       language: language === 'en-US' ? 'en' : 'zh',
     },
   });
+}
+
+// Build binary frame: [4B header] [4B payload_size_BE] [payload]
+function buildV3Frame(msgType, flags, serialization, payload) {
+  const header = Buffer.alloc(4);
+  header[0] = 0x11; // version=1, header_size=1
+  header[1] = (msgType << 4) | (flags & 0x0f);
+  header[2] = (serialization << 4) | 0x00; // no compression
+  header[3] = 0x00;
+  const sizeBuf = Buffer.alloc(4);
+  sizeBuf.writeUInt32BE(payload.length, 0);
+  return Buffer.concat([header, sizeBuf, payload]);
+}
+
+function parseV3FrameJson(buf) {
+  // V3 server response frame:
+  // [4B header] [4B sequence] [4B payload_size BE] [JSON payload]
+  if (buf.length > 12) {
+    try {
+      const payloadSize = buf.readUInt32BE(8);
+      const json = buf.slice(12, 12 + payloadSize).toString('utf-8');
+      return JSON.parse(json);
+    } catch { /* continue fallback */ }
+  }
+  for (const offset of [12, 8]) {
+    if (buf.length <= offset) continue;
+    try {
+      const raw = buf.slice(offset).toString('utf-8').trim();
+      if (raw.startsWith('{')) return JSON.parse(raw);
+    } catch { /* continue */ }
+  }
+  return null;
+}
+
+function parseV3ServerMessage(data) {
+  const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+  if (buf.length < 4) return null;
+
+  return {
+    buf,
+    msgType: (buf[1] >> 4) & 0x0f,
+    isFinal: (buf[1] & 0x02) !== 0,
+    payload: parseV3FrameJson(buf),
+  };
+}
+
+function extractAsrText(payload) {
+  return payload?.result?.text || payload?.text || '';
+}
+
+// --- Volcengine ASR via V3 WebSocket (bigmodel_nostream) ---
+// Protocol: binary frames with 4-byte header + 4-byte payload_size + payload
+// Flow: connect → send full_client_request (JSON config) → send audio chunks → send final marker → receive result
+
+async function volcAsr(audioBase64, format, language) {
+  const audioBuf = Buffer.from(audioBase64, 'base64');
+  const configPayload = createVolcAsrConfigPayload(format, language);
 
   return new Promise((resolve, reject) => {
-    const wsUrl = 'wss://openspeech.bytedance.com/api/v3/sauc/bigmodel';
-    const ws = new WS(wsUrl, {
+    const ws = new WS(VOLC_ASR_WS_URL, {
       skipUTF8Validation: true,
-      headers: {
-        'X-Api-App-Key': VOLC_APP_ID,
-        'X-Api-Access-Key': VOLC_ACCESS_TOKEN,
-        'X-Api-Resource-Id': 'volc.bigasr.sauc.duration',
-        'X-Api-Connect-Id': crypto.randomUUID(),
-      },
+      headers: createVolcAsrHeaders(),
     });
     let done = false;
-    let accumulatedText = '';  // collect best text across all server frames
+    let accumulatedText = '';
 
     const finish = (err, text) => {
       if (done) return;
@@ -180,90 +238,41 @@ async function volcAsr(audioBase64, format, language) {
       finish(new Error('ASR WebSocket timeout after 30 seconds'));
     }, 30_000);
 
-    // Build binary frame: [4B header] [4B payload_size_BE] [payload]
-    function buildFrame(msgType, flags, serialization, payload) {
-      const header = Buffer.alloc(4);
-      header[0] = 0x11;  // version=1, header_size=1
-      header[1] = (msgType << 4) | (flags & 0x0f);
-      header[2] = (serialization << 4) | 0x00;  // no compression
-      header[3] = 0x00;
-      const sizeBuf = Buffer.alloc(4);
-      sizeBuf.writeUInt32BE(payload.length, 0);
-      return Buffer.concat([header, sizeBuf, payload]);
-    }
-
-    // Parse JSON payload from a V3 binary frame.
-    // V3 frame layout (server→client):
-    //   [4B header] [4B payload_size BE] [payload]
-    // The header_size nibble (byte0 & 0x0f) tells how many 4-byte words the header is;
-    // we send header_size=1 (4B), but the server may use header_size=2 (8B header + 4B size).
-    // Try all plausible offsets in order.
-    function parseFrameJson(buf) {
-      // V3 server response frame layout:
-      //   [4B header] [4B sequence] [4B payload_size BE] [JSON payload]
-      // Payload always starts at offset 12.
-      if (buf.length > 12) {
-        try {
-          const payloadSize = buf.readUInt32BE(8);
-          const json = buf.slice(12, 12 + payloadSize).toString('utf-8');
-          return JSON.parse(json);
-        } catch { /* fall through to brute-force */ }
-      }
-      // Fallback: try common offsets
-      for (const offset of [12, 8]) {
-        if (buf.length <= offset) continue;
-        try {
-          const s = buf.slice(offset).toString('utf-8').trim();
-          if (s.startsWith('{')) return JSON.parse(s);
-        } catch { /* try next */ }
-      }
-      return null;
-    }
-
     ws.on('open', () => {
       // 1. Send full_client_request (msg_type=0x1, serialization=JSON=0x1)
       const configBuf = Buffer.from(configPayload, 'utf-8');
-      ws.send(buildFrame(0x1, 0x0, 0x1, configBuf));
+      ws.send(buildV3Frame(0x1, 0x0, 0x1, configBuf));
 
       // 2. Send audio data in chunks (msg_type=0x2)
       const CHUNK_SIZE = 8000;  // 8KB chunks
       for (let i = 0; i < audioBuf.length; i += CHUNK_SIZE) {
         const chunk = audioBuf.slice(i, i + CHUNK_SIZE);
         const isLast = (i + CHUNK_SIZE) >= audioBuf.length;
-        ws.send(buildFrame(0x2, isLast ? 0x2 : 0x0, 0x0, chunk));
+        ws.send(buildV3Frame(0x2, isLast ? 0x2 : 0x0, 0x0, chunk));
       }
 
       // 3. If audio was empty, send final empty marker
       if (audioBuf.length === 0) {
-        ws.send(buildFrame(0x2, 0x2, 0x0, Buffer.alloc(0)));
+        ws.send(buildV3Frame(0x2, 0x2, 0x0, Buffer.alloc(0)));
       }
     });
 
     ws.on('message', (data) => {
       try {
-        const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
-        if (buf.length < 4) return;
-
-        const msgType = (buf[1] >> 4) & 0x0f;
-
-        const result = parseFrameJson(buf);
-        if (!result) return;
+        const parsed = parseV3ServerMessage(data);
+        if (!parsed || !parsed.payload) return;
 
         // V3 error response (msg_type=0xf)
-        if (msgType === 0xf) {
+        if (parsed.msgType === 0xf) {
           clearTimeout(timeout);
-          finish(new Error(`ASR error: ${result.error || result.message || JSON.stringify(result).slice(0, 200)}`));
+          finish(new Error(`ASR error: ${parsed.payload.error || parsed.payload.message || JSON.stringify(parsed.payload).slice(0, 200)}`));
           return;
         }
 
-        // Collect text from any server result frame (intermediate or final)
-        const text = result.result?.text || result.text || '';
-        if (text) accumulatedText = text;  // keep updating — last non-empty wins
+        const text = extractAsrText(parsed.payload);
+        if (text) accumulatedText = text;
 
-        // For non-streaming bigmodel: resolve immediately on final frame flag
-        // (bit 1 of the flags nibble in byte 1)
-        const isFinal = (buf[1] & 0x02) !== 0;
-        if (isFinal) {
+        if (parsed.isFinal) {
           clearTimeout(timeout);
           finish(null, accumulatedText.trim());
         }
@@ -285,6 +294,244 @@ async function volcAsr(audioBase64, format, language) {
     });
   });
 }
+
+function normalizeStreamFormat(input) {
+  if (input === 'pcm' || input === 'raw' || input === 's16le') return 'pcm';
+  if (input === 'ogg' || input === 'webm') return 'ogg';
+  return 'wav';
+}
+
+function sendWsJson(ws, payload) {
+  if (ws.readyState !== WS.OPEN) return;
+  try { ws.send(JSON.stringify(payload)); } catch { /* ignore */ }
+}
+
+function createHttpErrorResponse(status, message) {
+  const body = JSON.stringify({ error: message });
+  return [
+    `HTTP/1.1 ${status} ${http.STATUS_CODES[status] || 'Error'}`,
+    'Content-Type: application/json',
+    'Connection: close',
+    `Content-Length: ${Buffer.byteLength(body)}`,
+    '',
+    body,
+  ].join('\r\n');
+}
+
+function handleStreamUpgrade(req, socket, head) {
+  let parsed;
+  try {
+    parsed = new URL(req.url || '/', 'http://localhost');
+  } catch {
+    socket.write(createHttpErrorResponse(400, 'Bad request URL'));
+    socket.destroy();
+    return;
+  }
+
+  if (parsed.pathname !== '/v1/asr/stream') {
+    socket.write(createHttpErrorResponse(404, 'Not found'));
+    socket.destroy();
+    return;
+  }
+
+  const ip = req.headers['x-forwarded-for']?.toString().split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+  if (!checkRateLimit(ip)) {
+    socket.write(createHttpErrorResponse(429, `Rate limit exceeded. Max ${RATE_LIMIT_PER_MIN} requests per minute.`));
+    socket.destroy();
+    return;
+  }
+
+  const ts = parsed.searchParams.get('ts') || req.headers['x-ec-timestamp'];
+  const sig = parsed.searchParams.get('sig') || req.headers['x-ec-signature'];
+  if (!verifyHmac('GET', '/v1/asr/stream', ts, sig, '')) {
+    socket.write(createHttpErrorResponse(401, 'Unauthorized: invalid or missing signature'));
+    socket.destroy();
+    return;
+  }
+
+  asrStreamWss.handleUpgrade(req, socket, head, (ws) => {
+    asrStreamWss.emit('connection', ws, req);
+  });
+}
+
+function handleAsrStreamSession(client, req) {
+  const ip = req.headers['x-forwarded-for']?.toString().split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+  const upstream = new WS(VOLC_ASR_WS_URL, {
+    skipUTF8Validation: true,
+    headers: createVolcAsrHeaders(),
+  });
+
+  let done = false;
+  let started = false;
+  let startReceived = false;
+  let endedByClient = false;
+  let configSent = false;
+  let finalSentToUpstream = false;
+  let language = 'zh-CN';
+  let format = 'pcm';
+  let accumulatedText = '';
+  const queuedAudio = [];
+  const MAX_QUEUED_AUDIO = 2 * 1024 * 1024;
+  let queuedBytes = 0;
+
+  let finalWaitTimer = null;
+  const sessionTimeout = setTimeout(() => {
+    finishError('ASR stream timeout');
+  }, 120_000);
+
+  const cleanup = () => {
+    clearTimeout(sessionTimeout);
+    if (finalWaitTimer) {
+      clearTimeout(finalWaitTimer);
+      finalWaitTimer = null;
+    }
+    try { upstream.close(); } catch { /* ignore */ }
+    try { client.close(); } catch { /* ignore */ }
+  };
+
+  const finishError = (message) => {
+    if (done) return;
+    done = true;
+    sendWsJson(client, { type: 'error', error: message });
+    cleanup();
+  };
+
+  const finishSuccess = (text) => {
+    if (done) return;
+    done = true;
+    sendWsJson(client, { type: 'final', text: (text || '').trim() });
+    cleanup();
+    console.log(`[ASR/STREAM] ${ip} result="${(text || '').slice(0, 30)}"`);
+  };
+
+  const sendConfigIfReady = () => {
+    if (configSent || upstream.readyState !== WS.OPEN || !startReceived) return;
+    const payload = Buffer.from(createVolcAsrConfigPayload(format, language), 'utf-8');
+    upstream.send(buildV3Frame(0x1, 0x0, 0x1, payload));
+    configSent = true;
+
+    while (queuedAudio.length > 0) {
+      const chunk = queuedAudio.shift();
+      queuedBytes -= chunk.length;
+      upstream.send(buildV3Frame(0x2, 0x0, 0x0, chunk));
+    }
+
+    if (endedByClient) sendFinalMarker();
+  };
+
+  const sendFinalMarker = () => {
+    if (!configSent || upstream.readyState !== WS.OPEN || finalSentToUpstream) return;
+    finalSentToUpstream = true;
+    upstream.send(buildV3Frame(0x2, 0x2, 0x0, Buffer.alloc(0)));
+    finalWaitTimer = setTimeout(() => {
+      finishSuccess(accumulatedText);
+    }, 12_000);
+  };
+
+  const forwardAudioChunk = (chunk) => {
+    if (done || endedByClient) return;
+    started = true;
+    if (!startReceived) startReceived = true;
+    if (upstream.readyState === WS.OPEN && !configSent) {
+      sendConfigIfReady();
+    }
+    if (upstream.readyState === WS.OPEN && configSent) {
+      upstream.send(buildV3Frame(0x2, 0x0, 0x0, chunk));
+      return;
+    }
+    queuedAudio.push(chunk);
+    queuedBytes += chunk.length;
+    if (queuedBytes > MAX_QUEUED_AUDIO) {
+      finishError('ASR stream audio queue overflow');
+    }
+  };
+
+  upstream.on('open', () => {
+    sendConfigIfReady();
+  });
+
+  upstream.on('message', (data) => {
+    const parsed = parseV3ServerMessage(data);
+    if (!parsed || !parsed.payload) return;
+
+    if (parsed.msgType === 0xf) {
+      finishError(`ASR error: ${parsed.payload.error || parsed.payload.message || 'upstream failure'}`);
+      return;
+    }
+
+    const text = extractAsrText(parsed.payload).trim();
+    if (text && text !== accumulatedText) {
+      accumulatedText = text;
+      sendWsJson(client, { type: 'partial', text: accumulatedText });
+    }
+
+    if (parsed.isFinal) {
+      finishSuccess(accumulatedText);
+    }
+  });
+
+  upstream.on('error', (err) => {
+    if (!done) finishError(`ASR upstream websocket error: ${err.message || 'connection failed'}`);
+  });
+
+  upstream.on('close', () => {
+    if (!done) finishSuccess(accumulatedText);
+  });
+
+  client.on('message', (data, isBinary) => {
+    if (done) return;
+
+    if (isBinary) {
+      const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
+      if (chunk.length > 0) forwardAudioChunk(chunk);
+      return;
+    }
+
+    let msg;
+    try {
+      const raw = typeof data === 'string' ? data : data.toString('utf-8');
+      msg = JSON.parse(raw);
+    } catch {
+      finishError('Invalid JSON frame');
+      return;
+    }
+
+    if (msg?.type === 'start') {
+      started = true;
+      startReceived = true;
+      if (typeof msg.language === 'string') language = msg.language;
+      if (msg.audio && typeof msg.audio.format === 'string') {
+        format = normalizeStreamFormat(msg.audio.format);
+      }
+      sendConfigIfReady();
+      return;
+    }
+
+    if (msg?.type === 'end') {
+      endedByClient = true;
+      if (!started) started = true;
+      if (!startReceived) startReceived = true;
+      sendConfigIfReady();
+      sendFinalMarker();
+      return;
+    }
+  });
+
+  client.on('close', () => {
+    if (done) return;
+    done = true;
+    clearTimeout(sessionTimeout);
+    if (finalWaitTimer) clearTimeout(finalWaitTimer);
+    try { upstream.close(); } catch { /* ignore */ }
+  });
+
+  client.on('error', () => {
+    if (!done) finishError('Client websocket error');
+  });
+}
+
+const asrStreamWss = new WS.WebSocketServer({ noServer: true });
+asrStreamWss.on('connection', handleAsrStreamSession);
 
 // --- HTTP Server ---
 function readBody(req) {
@@ -325,7 +572,13 @@ const server = http.createServer(async (req, res) => {
   }
 
   const ip = req.headers['x-forwarded-for']?.toString().split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
-  const url = req.url;
+  let url = '/';
+  try {
+    url = new URL(req.url || '/', 'http://localhost').pathname;
+  } catch {
+    sendJson(res, 400, { error: 'Bad request URL' });
+    return;
+  }
 
   // Health check
   if (url === '/health' && req.method === 'GET') {
@@ -415,13 +668,15 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    sendJson(res, 404, { error: 'Not found. Endpoints: POST /v1/tts, POST /v1/asr, GET /health' });
+    sendJson(res, 404, { error: 'Not found. Endpoints: POST /v1/tts, POST /v1/asr, WS /v1/asr/stream, GET /health' });
   } catch (err) {
     const msg = err.message?.slice(0, 200) || 'Unknown error';
     console.error(`[ERROR] ${ip} ${url}:`, msg);
     sendJson(res, 500, { error: msg });
   }
 });
+
+server.on('upgrade', handleStreamUpgrade);
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[EchoCoding Proxy] Listening on port ${PORT}`);

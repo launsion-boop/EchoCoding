@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { getSoundsDir, getConfig } from '../config.js';
-import { shouldThrottle, recordUsage } from '../throttle.js';
+import { shouldThrottle, recordUsage, type ThrottleOptions } from '../throttle.js';
 
 /**
  * Sound effect fallback chains.
@@ -36,6 +36,17 @@ const FALLBACK_CHAINS: Record<string, string[]> = {
 
 const SUPPORTED_EXTENSIONS = ['.mp3', '.wav', '.ogg', '.m4a', '.aiff'];
 
+// Per-SFX throttle tuning:
+// default throttle (3s) is too coarse for dense tool streams and can hide events.
+const SFX_THROTTLE_OVERRIDES: Record<string, Partial<ThrottleOptions>> = {
+  write: { minInterval: 0.15, dedupWindow: 0.5 },
+  typing: { minInterval: 0.15, dedupWindow: 0.4 },
+  read: { minInterval: 0.35, dedupWindow: 0.8 },
+  search: { minInterval: 0.35, dedupWindow: 0.8 },
+  notification: { minInterval: 0.5, dedupWindow: 0.9 },
+  working: { minInterval: 0.5, dedupWindow: 0.9 },
+};
+
 export function playSfx(name: string): void {
   const config = getConfig();
 
@@ -43,7 +54,8 @@ export function playSfx(name: string): void {
     return;
   }
 
-  if (shouldThrottle('sfx:' + name)) {
+  const throttleOptions = SFX_THROTTLE_OVERRIDES[name];
+  if (shouldThrottle('sfx:' + name, undefined, throttleOptions)) {
     return;
   }
 
