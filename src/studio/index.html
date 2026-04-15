@@ -889,9 +889,9 @@
 
   // --- Mode Panel ---
   const VOICE_MODES = [
-    { id: 'minimal',  label: '简约',   desc: '仅关键操作提示，SFX 常驻' },
-    { id: 'balanced', label: '平衡',   desc: '关键操作播报，支持语音问答' },
-    { id: 'verbose',  label: '强语音', desc: '每步操作全量播报' },
+    { id: 'minimal',  label: '简约', labelEn: 'Minimal',  desc: '仅关键操作提示，SFX 常驻', descEn: 'Key moments only, SFX always on' },
+    { id: 'balanced', label: '平衡', labelEn: 'Balanced', desc: '关键操作播报，支持语音问答', descEn: 'Key actions narrated, voice Q&A' },
+    { id: 'verbose',  label: '强语音', labelEn: 'Verbose', desc: '每步操作全量播报', descEn: 'Every action narrated' },
   ];
 
   function renderModeSection() {
@@ -900,10 +900,14 @@
     document.getElementById('modeCards').innerHTML = VOICE_MODES.map(m => `
       <div class="mode-card ${enabled && level === m.id ? 'active' : ''}" onclick="setVoiceMode('${m.id}')">
         <div class="mode-card-top">
-          <span class="mode-name">${m.label}</span>
+          <div>
+            <span class="mode-name">${m.label}</span>
+            <span style="font-size:13px;color:var(--text-dim);margin-left:6px">${m.labelEn}</span>
+          </div>
           <div class="toggle ${enabled && level === m.id ? 'on' : ''}"></div>
         </div>
         <div class="mode-desc">${m.desc}</div>
+        <div class="mode-desc" style="color:var(--text-dim);opacity:0.6;margin-top:2px">${m.descEn}</div>
       </div>
     `).join('');
     const offToggle = document.getElementById('echoOffToggle');
