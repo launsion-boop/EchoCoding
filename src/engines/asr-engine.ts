@@ -25,12 +25,12 @@ const ASK_SHARED_MIC_MAX_SEC = 30 * 60;
 const ASK_GATE_QUIET_MS = 100;
 const ASK_GATE_MAX_WAIT_MS = 280;
 const ASK_GATE_QUIET_FACTOR = 0.75;
-const ASK_TTS_START_GATE_TIMEOUT_MS = 1_500;
-const ASK_TTS_START_ANTIBLEED_MS = 260;
 const ASK_TTS_POST_ECHO_GUARD_MS = 1_800;
 const ASK_PROMPT_ECHO_RETRY_MAX = 2;
 const ASK_RECOVERABLE_ERROR_RETRY_MAX = 3;
 const ASK_RECOVERABLE_ERROR_BACKOFF_MS = 180;
+const ASK_NON_ECHO_VOICE_MIN_MS = 220;
+const ASK_STRICT_NON_ECHO_RATIO_MIN = 0.55;
 const ECHO_ONLY_RMS_RATIO_MAX = 0.72;
 const ECHO_DOUBLE_TALK_RMS_FACTOR = 1.22;
 const ASK_LOCK_DIR = path.join(os.tmpdir(), 'echocoding-ask.lock');
@@ -379,6 +379,23 @@ function isLikelyPromptEchoPartial(partialText: string, promptText: string): boo
   if (partial.startsWith(prompt) && prompt.length >= 1) return true;
 
   return isLikelyPromptEcho(partialText, promptText);
+}
+
+function requiredNonEchoVoicedMs(strictWindow: boolean): number {
+  return strictWindow ? ASK_NON_ECHO_VOICE_MIN_MS : 0;
+}
+
+function hasEnoughNonEchoEvidence(
+  nonEchoVoicedMs: number,
+  voicedMs: number,
+  strictWindow: boolean,
+): boolean {
+  if (nonEchoVoicedMs < requiredNonEchoVoicedMs(strictWindow)) {
+    return false;
+  }
+  if (!strictWindow) return true;
+  if (voicedMs <= 0) return false;
+  return (nonEchoVoicedMs / voicedMs) >= ASK_STRICT_NON_ECHO_RATIO_MIN;
 }
 
 function isRecoverableAskError(err: unknown): boolean {
@@ -837,19 +854,6 @@ export async function ask(
 
   try {
     const hud = await acquireAskHud(hudEnabled);
-    let releaseStartGate: (() => void) | null = null;
-    const startGateReady = new Promise<void>((resolve) => {
-      releaseStartGate = resolve;
-    });
-    let startGateReleased = false;
-    const openStartGate = () => {
-      if (startGateReleased) return;
-      startGateReleased = true;
-      releaseStartGate?.();
-    };
-    const startGateTimeout = setTimeout(openStartGate, ASK_TTS_START_GATE_TIMEOUT_MS);
-    startGateTimeout.unref();
-
     try {
       hud.reset();
 
@@ -864,14 +868,12 @@ export async function ask(
       const speakTask = speak(question, {
         force: true,
         onPlaybackStart: () => {
-          openStartGate();
           extendTtsEchoGuard();
           if (promptShown) return;
           promptShown = true;
           if (prompt) hud.updatePrompt(prompt);
         },
       }).catch(() => {
-        openStartGate();
         extendTtsEchoGuard();
         if (!promptShown && prompt) {
           promptShown = true;
@@ -884,7 +886,6 @@ export async function ask(
 
       const askDeadlineAt = Date.now() + (effectiveTimeout * 1000);
       let result = '[timeout]';
-      let useStartGate = true;
       let echoRetryCount = 0;
       let recoverableErrorCount = 0;
       let hudFinalized = false;
@@ -909,10 +910,6 @@ export async function ask(
                 !!prompt &&
                 isLikelyPromptEchoPartial(text, prompt)
               ),
-              startGate: useStartGate ? {
-                ready: startGateReady,
-                antiBleedMs: ASK_TTS_START_ANTIBLEED_MS,
-              } : undefined,
               // Ask mode: if there is no clear response, keep channel open up to timeout.
               vadOverrides: {
                 // Favor responsiveness during interactive ask.
@@ -940,7 +937,6 @@ export async function ask(
           recoverableErrorCount += 1;
           hud.updateStatus('Reconnecting', true);
           hud.updatePartial('');
-          useStartGate = false;
           await delayMs(Math.min(ASK_RECOVERABLE_ERROR_BACKOFF_MS * recoverableErrorCount, 420));
           continue;
         }
@@ -970,7 +966,6 @@ export async function ask(
         try { await speakTask; } catch { /* ignore */ }
         hud.updateStatus('Listening', true);
         hud.updatePartial('');
-        useStartGate = false;
       }
 
       if (!hudFinalized) {
@@ -983,16 +978,12 @@ export async function ask(
       }
 
       void speakTask;
-      clearTimeout(startGateTimeout);
-      openStartGate();
       return result;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       hud.error(message || 'ASK failed');
       throw err;
     } finally {
-      clearTimeout(startGateTimeout);
-      openStartGate();
       await releaseAskHud(hud, hudEnabled, { forceClose: forceCloseHud });
     }
   } catch (err) {
@@ -1644,9 +1635,12 @@ async function recordSpeechWithVad(
   let candidateActive = false;
   let candidateVoicedMs = 0;
   let candidateLastVoiceAt = 0;
-  let candidateHasNonEchoVoiced = false;
+  let candidateNonEchoVoicedMs = 0;
+  let candidateStrictWindow = false;
   let lastVoiceAt = 0;
-  let speechHasNonEchoVoiced = false;
+  let speechStrictWindow = false;
+  let speechVoicedMs = 0;
+  let speechNonEchoVoicedMs = 0;
 
   const preRollBuffers: Buffer[] = [];
   const candidateBuffers: Buffer[] = [];
@@ -1712,7 +1706,7 @@ async function recordSpeechWithVad(
       settleResolve(null);
       return;
     }
-    if (!speechHasNonEchoVoiced) {
+    if (!hasEnoughNonEchoEvidence(speechNonEchoVoicedMs, speechVoicedMs, speechStrictWindow)) {
       settleResolve(null);
       return;
     }
@@ -1738,7 +1732,8 @@ async function recordSpeechWithVad(
       candidateActive = false;
       candidateVoicedMs = 0;
       candidateLastVoiceAt = 0;
-      candidateHasNonEchoVoiced = false;
+      candidateNonEchoVoicedMs = 0;
+      candidateStrictWindow = false;
       preRollBuffers.length = 0;
       preRollBytes = 0;
       candidateBuffers.length = 0;
@@ -1755,7 +1750,8 @@ async function recordSpeechWithVad(
           candidateBuffers.push(...preRollBuffers, filteredChunk);
           candidateVoicedMs = chunkMs;
           candidateLastVoiceAt = now;
-          candidateHasNonEchoVoiced = !frame.echoLikely;
+          candidateNonEchoVoicedMs = !frame.echoLikely ? chunkMs : 0;
+          candidateStrictWindow = requireDoubleTalk;
         } else {
           preRollBuffers.push(filteredChunk);
           preRollBytes += filteredChunk.length;
@@ -1768,22 +1764,27 @@ async function recordSpeechWithVad(
       }
 
       candidateBuffers.push(filteredChunk);
+      if (requireDoubleTalk) {
+        candidateStrictWindow = true;
+      }
       if (voiced) {
         candidateVoicedMs += chunkMs;
         candidateLastVoiceAt = now;
-        if (!frame.echoLikely) candidateHasNonEchoVoiced = true;
+        if (!frame.echoLikely) candidateNonEchoVoicedMs += chunkMs;
       }
 
-      if (candidateVoicedMs >= vadConfig.minSpeechMs && candidateHasNonEchoVoiced) {
+      if (candidateVoicedMs >= vadConfig.minSpeechMs && hasEnoughNonEchoEvidence(candidateNonEchoVoicedMs, candidateVoicedMs, candidateStrictWindow)) {
         speechCommitted = true;
-        speechHasNonEchoVoiced = candidateHasNonEchoVoiced;
+        speechStrictWindow = candidateStrictWindow;
+        speechVoicedMs = candidateVoicedMs;
+        speechNonEchoVoicedMs = candidateNonEchoVoicedMs;
         hud.updateStatus('Recognizing', true);
         lastVoiceAt = candidateLastVoiceAt || now;
         for (const pending of candidateBuffers) appendSpeechChunk(pending);
         candidateBuffers.length = 0;
         preRollBuffers.length = 0;
         preRollBytes = 0;
-        candidateHasNonEchoVoiced = false;
+        candidateNonEchoVoicedMs = 0;
         return;
       }
 
@@ -1793,7 +1794,8 @@ async function recordSpeechWithVad(
         candidateBuffers.length = 0;
         candidateVoicedMs = 0;
         candidateLastVoiceAt = 0;
-        candidateHasNonEchoVoiced = false;
+        candidateNonEchoVoicedMs = 0;
+        candidateStrictWindow = false;
         preRollBuffers.length = 0;
         preRollBytes = 0;
       }
@@ -1801,9 +1803,13 @@ async function recordSpeechWithVad(
     }
 
     appendSpeechChunk(filteredChunk);
+    if (requireDoubleTalk) {
+      speechStrictWindow = true;
+    }
     if (voiced) {
       lastVoiceAt = now;
-      if (!frame.echoLikely) speechHasNonEchoVoiced = true;
+      speechVoicedMs += chunkMs;
+      if (!frame.echoLikely) speechNonEchoVoicedMs += chunkMs;
     }
     else if (now - lastVoiceAt >= vadConfig.silenceMs) {
       hud.updateStatus('Speech ended', true);
@@ -2012,10 +2018,23 @@ async function listenCloudProxyStream(
 ): Promise<string> {
   const vadConfig = getVadRuntimeConfig(timeoutSec, vadInput, vadOverrides);
   const noiseState = createAdaptiveNoiseState(vadConfig, noiseControl);
+  let speechCommitted = false;
+  let candidateActive = false;
+  let candidateVoicedMs = 0;
+  let candidateLastVoiceAt = 0;
+  let candidateNonEchoVoicedMs = 0;
+  let candidateStrictWindow = false;
+  let lastVoiceAt = 0;
+  let speechStrictWindow = false;
+  let speechVoicedMs = 0;
+  let speechNonEchoVoicedMs = 0;
   const ws = await openProxyAsrStream(endpoint);
   const resultPromise = createProxyStreamResultPromise(ws, (event) => {
     if (event.type === 'partial' && event.text) {
       const partial = event.text.trim();
+      if (!speechCommitted) {
+        return;
+      }
       if (partial && promptEchoFilter?.(partial)) {
         return;
       }
@@ -2037,14 +2056,6 @@ async function listenCloudProxyStream(
   let quietMs = 0;
   const preRollLimitBytes = Math.max(0, Math.floor((vadConfig.preRollMs / 1000) * PCM_BYTES_PER_SECOND));
   const maxSourceSec = Math.ceil(vadConfig.maxDurationMs / 1000) + 1;
-
-  let speechCommitted = false;
-  let candidateActive = false;
-  let candidateVoicedMs = 0;
-  let candidateLastVoiceAt = 0;
-  let candidateHasNonEchoVoiced = false;
-  let lastVoiceAt = 0;
-  let speechHasNonEchoVoiced = false;
 
   const preRollBuffers: Buffer[] = [];
   const candidateBuffers: Buffer[] = [];
@@ -2101,7 +2112,7 @@ async function listenCloudProxyStream(
 
   const finishSpeech = (reason: string) => {
     if (finished) return;
-    if (!speechHasNonEchoVoiced) {
+    if (!hasEnoughNonEchoEvidence(speechNonEchoVoicedMs, speechVoicedMs, speechStrictWindow)) {
       finishTimeout();
       return;
     }
@@ -2174,7 +2185,8 @@ async function listenCloudProxyStream(
       candidateActive = false;
       candidateVoicedMs = 0;
       candidateLastVoiceAt = 0;
-      candidateHasNonEchoVoiced = false;
+      candidateNonEchoVoicedMs = 0;
+      candidateStrictWindow = false;
       preRollBuffers.length = 0;
       preRollBytes = 0;
       candidateBuffers.length = 0;
@@ -2191,7 +2203,8 @@ async function listenCloudProxyStream(
           candidateBuffers.push(...preRollBuffers, filteredChunk);
           candidateVoicedMs = chunkMs;
           candidateLastVoiceAt = now;
-          candidateHasNonEchoVoiced = !frame.echoLikely;
+          candidateNonEchoVoicedMs = !frame.echoLikely ? chunkMs : 0;
+          candidateStrictWindow = requireDoubleTalk;
         } else {
           preRollBuffers.push(filteredChunk);
           preRollBytes += filteredChunk.length;
@@ -2204,15 +2217,20 @@ async function listenCloudProxyStream(
       }
 
       candidateBuffers.push(filteredChunk);
+      if (requireDoubleTalk) {
+        candidateStrictWindow = true;
+      }
       if (voiced) {
         candidateVoicedMs += chunkMs;
         candidateLastVoiceAt = now;
-        if (!frame.echoLikely) candidateHasNonEchoVoiced = true;
+        if (!frame.echoLikely) candidateNonEchoVoicedMs += chunkMs;
       }
 
-      if (candidateVoicedMs >= vadConfig.minSpeechMs && candidateHasNonEchoVoiced) {
+      if (candidateVoicedMs >= vadConfig.minSpeechMs && hasEnoughNonEchoEvidence(candidateNonEchoVoicedMs, candidateVoicedMs, candidateStrictWindow)) {
         speechCommitted = true;
-        speechHasNonEchoVoiced = candidateHasNonEchoVoiced;
+        speechStrictWindow = candidateStrictWindow;
+        speechVoicedMs = candidateVoicedMs;
+        speechNonEchoVoicedMs = candidateNonEchoVoicedMs;
         hud.updateStatus('Recognizing', true);
         lastVoiceAt = candidateLastVoiceAt || now;
         for (const pending of candidateBuffers) {
@@ -2221,7 +2239,7 @@ async function listenCloudProxyStream(
         candidateBuffers.length = 0;
         preRollBuffers.length = 0;
         preRollBytes = 0;
-        candidateHasNonEchoVoiced = false;
+        candidateNonEchoVoicedMs = 0;
         return;
       }
 
@@ -2231,7 +2249,8 @@ async function listenCloudProxyStream(
         candidateBuffers.length = 0;
         candidateVoicedMs = 0;
         candidateLastVoiceAt = 0;
-        candidateHasNonEchoVoiced = false;
+        candidateNonEchoVoicedMs = 0;
+        candidateStrictWindow = false;
         preRollBuffers.length = 0;
         preRollBytes = 0;
       }
@@ -2239,9 +2258,13 @@ async function listenCloudProxyStream(
     }
 
     if (!sendSpeechChunk(filteredChunk)) return;
+    if (requireDoubleTalk) {
+      speechStrictWindow = true;
+    }
     if (voiced) {
       lastVoiceAt = now;
-      if (!frame.echoLikely) speechHasNonEchoVoiced = true;
+      speechVoicedMs += chunkMs;
+      if (!frame.echoLikely) speechNonEchoVoicedMs += chunkMs;
     }
     else if (now - lastVoiceAt >= vadConfig.silenceMs) {
       hud.updateStatus('Speech ended', true);
