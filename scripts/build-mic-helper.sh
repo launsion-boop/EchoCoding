@@ -68,10 +68,24 @@ chmod +x "$ROOT_DIR/tools/mic-helper"
 # Prefer explicit identity when provided; otherwise use ad-hoc signing.
 SIGN_IDENTITY="${ECHOCODING_SIGN_IDENTITY:--}"
 if command -v codesign >/dev/null 2>&1; then
-  if codesign --force --deep --sign "$SIGN_IDENTITY" "$APP_DIR"; then
-    echo "Signed: $APP_DIR (identity: $SIGN_IDENTITY)"
+  if [ "$SIGN_IDENTITY" = "-" ]; then
+    # Important: plain ad-hoc signing defaults to a cdhash-based designated requirement,
+    # which changes every rebuild and can make TCC prompt repeatedly.
+    # Pin designated requirement to bundle identifier so mic permission survives rebuilds.
+    if codesign --force --deep --sign - \
+      --identifier com.echoclaw.mic-helper \
+      --requirements '=designated => identifier "com.echoclaw.mic-helper"' \
+      "$APP_DIR"; then
+      echo "Signed: $APP_DIR (identity: ad-hoc, designated requirement: bundle id)"
+    else
+      echo "Warning: ad-hoc codesign failed for $APP_DIR" >&2
+    fi
   else
-    echo "Warning: codesign failed for $APP_DIR" >&2
+    if codesign --force --deep --sign "$SIGN_IDENTITY" "$APP_DIR"; then
+      echo "Signed: $APP_DIR (identity: $SIGN_IDENTITY)"
+    else
+      echo "Warning: codesign failed for $APP_DIR (identity: $SIGN_IDENTITY)" >&2
+    fi
   fi
 fi
 
