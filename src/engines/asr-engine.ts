@@ -979,7 +979,9 @@ export async function ask(
   const hudEnabled = os.platform() === 'darwin';
   const prompt = question.trim();
   const releaseAskLock = await acquireAskLock();
-  const forceCloseHud = options.forceCloseHud === true;
+  // Default: close HUD immediately after result — model doesn't need to remember ask-end.
+  // Pass forceCloseHud: false to keep the 60s idle window instead (e.g. for UI previews).
+  const forceCloseHud = options.forceCloseHud !== false;
 
   try {
     const hud = await acquireAskHud(hudEnabled);

@@ -129,14 +129,8 @@ export function sendWithResponse(msg: DaemonMessage, timeoutMs = 30_000): Promis
   });
 }
 
-export async function sendAsk(
-  text: string,
-  options: { forceCloseHud?: boolean } = {},
-): Promise<string> {
-  return sendWithResponse(
-    { type: 'ask', text, forceCloseHud: options.forceCloseHud === true },
-    80_000,
-  );
+export async function sendAsk(text: string): Promise<string> {
+  return sendWithResponse({ type: 'ask', text }, 80_000);
 }
 
 export async function sendListen(): Promise<string> {

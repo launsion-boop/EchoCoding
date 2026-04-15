@@ -268,12 +268,10 @@ program
 program
   .command('ask <question>')
   .description('Speak a question via TTS, then listen for voice answer (ASK mode timeout: 60s)')
-  .option('--force-close', 'Force close ASK HUD right after this ask finishes')
-  .action(async (question: string, opts: { forceClose?: boolean }) => {
-    const forceCloseHud = opts.forceClose === true;
-    // Prefer daemon path so multi-turn ASK can reuse one HUD session.
+  .action(async (question: string) => {
+    // HUD closes automatically after result — no need for explicit ask-end.
     try {
-      const result = await sendAsk(question, { forceCloseHud });
+      const result = await sendAsk(question);
       process.stdout.write(result + '\n');
       return;
     } catch {
@@ -282,7 +280,7 @@ program
 
     try {
       const { ask } = await import('../src/engines/asr-engine.js');
-      const result = await ask(question, 60, { forceCloseHud });
+      const result = await ask(question, 60);
       process.stdout.write(result + '\n');
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
