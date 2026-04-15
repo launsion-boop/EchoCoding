@@ -14,6 +14,8 @@ import Foundation
 import AppKit  // Needed for NSApplication run loop (permission dialogs require it)
 import Darwin
 
+let hudPidFilePath = "/tmp/echocoding-hud.pid"
+
 // MARK: - Permission
 
 func checkPermission() -> Bool {
@@ -85,6 +87,74 @@ func requestPermissionWithRunLoop() -> Bool {
     return granted
 }
 
+func envBool(_ key: String, defaultValue: Bool) -> Bool {
+    guard let raw = ProcessInfo.processInfo.environment[key]?.trimmingCharacters(in: .whitespacesAndNewlines),
+          !raw.isEmpty
+    else { return defaultValue }
+    switch raw.lowercased() {
+    case "1", "true", "yes", "on":
+        return true
+    case "0", "false", "no", "off":
+        return false
+    default:
+        return defaultValue
+    }
+}
+
+func shouldEnableVoiceProcessing() -> Bool {
+    // VoiceProcessingIO can trigger system ducking in some routes.
+    // Keep disabled by default so HUD/ASK TTS playback volume stays stable.
+    return envBool("ECHOCODING_MIC_VOICE_PROCESSING", defaultValue: false)
+}
+
+@available(macOS 14.0, *)
+func resolveVoiceProcessingDuckingLevel() -> AVAudioVoiceProcessingOtherAudioDuckingConfiguration.Level {
+    let raw = ProcessInfo.processInfo.environment["ECHOCODING_MIC_VP_DUCKING_LEVEL"]?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased() ?? "min"
+
+    let levelRawValue: Int
+    switch raw {
+    case "default":
+        levelRawValue = 0
+    case "mid":
+        levelRawValue = 20
+    case "max":
+        levelRawValue = 30
+    default:
+        levelRawValue = 10
+    }
+
+    return AVAudioVoiceProcessingOtherAudioDuckingConfiguration.Level(rawValue: levelRawValue)
+        ?? AVAudioVoiceProcessingOtherAudioDuckingConfiguration.Level(rawValue: 10)!
+}
+
+func configureVoiceProcessing(_ input: AVAudioInputNode, enabled: Bool, context: String) {
+    guard #available(macOS 10.15, *), enabled else {
+        debugLog("\(context): voice processing disabled")
+        return
+    }
+
+    do {
+        try input.setVoiceProcessingEnabled(true)
+        debugLog("\(context): voice processing enabled")
+
+        // AGC can make perceived loudness unstable in noisy environments.
+        input.isVoiceProcessingAGCEnabled = !envBool("ECHOCODING_MIC_VP_DISABLE_AGC", defaultValue: true)
+        debugLog("\(context): voice processing AGC=\(input.isVoiceProcessingAGCEnabled)")
+
+        if #available(macOS 14.0, *) {
+            var config = input.voiceProcessingOtherAudioDuckingConfiguration
+            config.enableAdvancedDucking = false
+            config.duckingLevel = resolveVoiceProcessingDuckingLevel()
+            input.voiceProcessingOtherAudioDuckingConfiguration = config
+            debugLog("\(context): ducking advanced=\(config.enableAdvancedDucking) levelRaw=\(config.duckingLevel.rawValue)")
+        }
+    } catch {
+        debugLog("\(context): voice processing unavailable \(error)")
+    }
+}
+
 // MARK: - WAV Recording
 
 class Recorder: NSObject {
@@ -98,14 +168,7 @@ class Recorder: NSObject {
 
         let input = engine.inputNode
         let hwFormat = input.outputFormat(forBus: 0)
-        if #available(macOS 10.15, *) {
-            do {
-                try input.setVoiceProcessingEnabled(true)
-                debugLog("record: voice processing enabled")
-            } catch {
-                debugLog("record: voice processing unavailable \(error)")
-            }
-        }
+        configureVoiceProcessing(input, enabled: shouldEnableVoiceProcessing(), context: "record")
 
         // Target: 16kHz, mono, 16-bit signed int
         guard let targetFormat = AVAudioFormat(
@@ -237,7 +300,7 @@ class StreamRecorder: NSObject {
     private var timer: DispatchSourceTimer?
     private var socketFd: Int32 = -1
 
-    func stream(seconds: Double, socketPath: String) -> Bool {
+    func stream(seconds: Double, socketPath: String, forceVoiceProcessing: Bool?) -> Bool {
         let fd = connectUnixSocket(socketPath)
         if fd < 0 {
             fputs("Error: cannot connect socket \(socketPath)\n", stderr)
@@ -250,14 +313,8 @@ class StreamRecorder: NSObject {
 
         let input = engine.inputNode
         let hwFormat = input.outputFormat(forBus: 0)
-        if #available(macOS 10.15, *) {
-            do {
-                try input.setVoiceProcessingEnabled(true)
-                debugLog("stream-record: voice processing enabled")
-            } catch {
-                debugLog("stream-record: voice processing unavailable \(error)")
-            }
-        }
+        let voiceProcessingEnabled = forceVoiceProcessing ?? shouldEnableVoiceProcessing()
+        configureVoiceProcessing(input, enabled: voiceProcessingEnabled, context: "stream-record")
 
         guard let targetFormat = AVAudioFormat(
             commonFormat: .pcmFormatInt16,
@@ -351,6 +408,10 @@ class StreamRecorder: NSObject {
 final class HudOverlayController: NSObject {
     private let statusDotIntervalMs: Int = 350
     private let cursorBlinkIntervalMs: Int = 500
+    private let minHudOpenMs: Int = 700
+    private let postTerminalHoldMs: Int = 1600
+    private let eofCloseGraceMs: Int = 260
+    private let hardIdleCloseMs: Int = 65_000
     private let userLinePrefix = "YOU: "
     private let socketFd: Int32
     private var fdClosed = false
@@ -365,13 +426,17 @@ final class HudOverlayController: NSObject {
     private var readSource: DispatchSourceRead?
     private var statusAnimationTimer: DispatchSourceTimer?
     private var cursorBlinkTimer: DispatchSourceTimer?
+    private var idleWatchdogTimer: DispatchSourceTimer?
+    private var closeWorkItem: DispatchWorkItem?
     private var readBuffer = Data()
     private var baseStatus = "Listening"
     private var isAnimating = false
     private var dotCount = 0
     private var closeRequested = false
     private var minVisibleUntil: Date?
+    private var scheduledCloseAt: Date?
     private var sawTerminalMessage = false
+    private var lastInboundAt = Date()
     private let maxConversationTurns = 2
 
     init(socketFd: Int32) {
@@ -379,10 +444,13 @@ final class HudOverlayController: NSObject {
     }
 
     func start() {
+        minVisibleUntil = Date().addingTimeInterval(Double(minHudOpenMs) / 1000.0)
+        lastInboundAt = Date()
         setupWindow()
         startReadLoop()
         startStatusAnimationTimer()
         startCursorBlinkTimer()
+        startIdleWatchdogTimer()
         updateStatusUI()
         ensureUserDraftVisible(force: true)
         renderConversation()
@@ -395,6 +463,10 @@ final class HudOverlayController: NSObject {
         statusAnimationTimer = nil
         cursorBlinkTimer?.cancel()
         cursorBlinkTimer = nil
+        idleWatchdogTimer?.cancel()
+        idleWatchdogTimer = nil
+        closeWorkItem?.cancel()
+        closeWorkItem = nil
         closeFdIfNeeded()
     }
 
@@ -500,11 +572,14 @@ final class HudOverlayController: NSObject {
             var buf = [UInt8](repeating: 0, count: 4096)
             let n = Darwin.read(self.socketFd, &buf, buf.count)
             if n <= 0 {
+                if self.closeRequested { return }
+                self.readSource?.cancel()
+                self.readSource = nil
                 // EOF can race with queued UI updates (final/partial).
                 // Give the main queue a brief grace period before closing.
                 self.processTailBufferIfNeeded()
                 DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(180)) {
-                    self.requestClose()
+                    self.requestClose(extraHoldMs: self.eofCloseGraceMs)
                 }
                 return
             }
@@ -561,6 +636,41 @@ final class HudOverlayController: NSObject {
         }
         userDraftActive = true
         userCursorVisible = true
+    }
+
+    private func extendVisibility(ms: Int) {
+        let until = Date().addingTimeInterval(Double(max(0, ms)) / 1000.0)
+        if let existing = minVisibleUntil {
+            minVisibleUntil = max(existing, until)
+        } else {
+            minVisibleUntil = until
+        }
+    }
+
+    private func scheduleClose(at date: Date) {
+        let now = Date()
+        if let scheduled = scheduledCloseAt, scheduled >= date {
+            let remainMs = Int((scheduled.timeIntervalSince(now) * 1000.0).rounded())
+            debugLog("hud: skip close reschedule remainMs=\(remainMs)")
+            return
+        }
+        scheduledCloseAt = date
+
+        closeWorkItem?.cancel()
+        closeWorkItem = nil
+
+        let delay = max(0.0, date.timeIntervalSinceNow)
+        debugLog("hud: schedule close delayMs=\(Int((delay * 1000.0).rounded()))")
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.closeWorkItem?.cancel()
+            self.closeWorkItem = nil
+            self.scheduledCloseAt = nil
+            debugLog("hud: close work item fired")
+            self.terminateApp()
+        }
+        closeWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
     private func renderConversation() {
@@ -620,12 +730,16 @@ final class HudOverlayController: NSObject {
     }
 
     private func handleHudMessage(_ msg: [String: Any]) {
+        lastInboundAt = Date()
         guard let type = msg["type"] as? String else { return }
         switch type {
         case "reset":
             closeRequested = false
             sawTerminalMessage = false
-            minVisibleUntil = nil
+            minVisibleUntil = Date().addingTimeInterval(Double(minHudOpenMs) / 1000.0)
+            closeWorkItem?.cancel()
+            closeWorkItem = nil
+            scheduledCloseAt = nil
             baseStatus = "Preparing"
             isAnimating = true
             dotCount = 0
@@ -661,6 +775,7 @@ final class HudOverlayController: NSObject {
             }
         case "final":
             sawTerminalMessage = true
+            extendVisibility(ms: postTerminalHoldMs)
             baseStatus = "Done"
             isAnimating = false
             dotCount = 0
@@ -675,8 +790,12 @@ final class HudOverlayController: NSObject {
             renderConversation()
             debugLog("hud: final text=\(String(text.prefix(120)))")
             updateStatusUI()
+            if closeRequested {
+                requestClose()
+            }
         case "timeout":
             sawTerminalMessage = true
+            extendVisibility(ms: postTerminalHoldMs)
             baseStatus = "Timeout"
             isAnimating = false
             dotCount = 0
@@ -686,8 +805,12 @@ final class HudOverlayController: NSObject {
             appendConversationLine("System: No speech detected")
             debugLog("hud: timeout")
             updateStatusUI()
+            if closeRequested {
+                requestClose()
+            }
         case "error":
             sawTerminalMessage = true
+            extendVisibility(ms: postTerminalHoldMs)
             baseStatus = "Error"
             isAnimating = false
             dotCount = 0
@@ -698,6 +821,9 @@ final class HudOverlayController: NSObject {
             appendConversationLine(text.isEmpty ? "System: ASR error" : "System: \(text)")
             debugLog("hud: error text=\(String(text.prefix(120)))")
             updateStatusUI()
+            if closeRequested {
+                requestClose()
+            }
         case "close":
             debugLog("hud: close requested")
             requestClose()
@@ -738,20 +864,40 @@ final class HudOverlayController: NSObject {
         timer.resume()
     }
 
+    private func startIdleWatchdogTimer() {
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.main)
+        timer.schedule(
+            deadline: .now() + .milliseconds(1000),
+            repeating: .milliseconds(1000)
+        )
+        timer.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            if self.closeRequested { return }
+            let idleMs = Date().timeIntervalSince(self.lastInboundAt) * 1000.0
+            if idleMs < Double(self.hardIdleCloseMs) { return }
+            debugLog("hud: idle watchdog close")
+            self.requestClose()
+        }
+        idleWatchdogTimer = timer
+        timer.resume()
+    }
+
     private func updateStatusUI() {
         let dots = String(repeating: ".", count: isAnimating ? dotCount : 0)
         statusLabel?.stringValue = isAnimating ? "\(baseStatus)\(dots)" : baseStatus
     }
 
-    private func requestClose() {
-        guard !closeRequested else { return }
+    private func requestClose(extraHoldMs: Int = 0) {
         closeRequested = true
-        // ASK session ended. Close HUD immediately to avoid stale floating windows
-        // and prevent overlap across concurrent sessions.
-        terminateApp()
+        let extraUntil = Date().addingTimeInterval(Double(max(0, extraHoldMs)) / 1000.0)
+        let holdUntil = max(minVisibleUntil ?? Date(), extraUntil)
+        let delayMs = Int((holdUntil.timeIntervalSinceNow * 1000.0).rounded())
+        debugLog("hud: requestClose extraHoldMs=\(extraHoldMs) delayMs=\(max(0, delayMs))")
+        scheduleClose(at: holdUntil)
     }
 
     private func terminateApp() {
+        debugLog("hud: terminate app")
         NSApp.stop(nil)
         let event = NSEvent.otherEvent(
             with: .applicationDefined,
@@ -772,10 +918,12 @@ final class HudOverlayController: NSObject {
 
 final class HudAppDelegate: NSObject, NSApplicationDelegate {
     private let socketPath: String
+    private let ownerPid: Int32
     private var overlay: HudOverlayController?
 
-    init(socketPath: String) {
+    init(socketPath: String, ownerPid: Int32) {
         self.socketPath = socketPath
+        self.ownerPid = ownerPid
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -792,6 +940,7 @@ final class HudAppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         overlay?.shutdown()
         overlay = nil
+        clearHudPidIfOwned(ownerPid)
     }
 }
 
@@ -807,6 +956,43 @@ func debugLog(_ msg: String) {
     } else {
         try? line.write(toFile: logPath, atomically: true, encoding: .utf8)
     }
+}
+
+func readHudPid() -> Int32? {
+    guard let raw = try? String(contentsOfFile: hudPidFilePath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+          let value = Int32(raw)
+    else {
+        return nil
+    }
+    return value
+}
+
+func isPidAlive(_ pid: Int32) -> Bool {
+    if pid <= 1 { return false }
+    if kill(pid, 0) == 0 { return true }
+    return errno == EPERM
+}
+
+func writeHudPid(_ pid: Int32) {
+    try? "\(pid)".write(toFile: hudPidFilePath, atomically: true, encoding: .utf8)
+}
+
+func clearHudPidIfOwned(_ pid: Int32) {
+    guard let existing = readHudPid(), existing == pid else { return }
+    try? FileManager.default.removeItem(atPath: hudPidFilePath)
+}
+
+func claimHudSingleton() {
+    let selfPid = Int32(getpid())
+    if let existing = readHudPid(), existing != selfPid, isPidAlive(existing) {
+        debugLog("hud: terminating stale pid=\(existing)")
+        _ = kill(existing, SIGTERM)
+        usleep(120_000)
+        if isPidAlive(existing) {
+            _ = kill(existing, SIGKILL)
+        }
+    }
+    writeHudPid(selfPid)
 }
 
 // MARK: - Main
@@ -869,12 +1055,29 @@ case "stream-record":
     let argList = Array(args)
     debugLog("stream-record: args=\(argList)")
     guard argList.count >= 2 else {
-        fputs("Usage: mic-helper stream-record <socket-path> [seconds]\n", stderr)
+        fputs("Usage: mic-helper stream-record <socket-path> [seconds] [--voice-processing|--no-voice-processing]\n", stderr)
         exit(2)
     }
     let socketPath = argList[1]
-    let seconds = (argList.count >= 3 ? Double(argList[2]) : nil) ?? 90
-    debugLog("stream-record: socket=\(socketPath) seconds=\(seconds)")
+    var seconds: Double = 90
+    var forceVoiceProcessing: Bool? = nil
+    if argList.count >= 3 {
+        for token in argList.dropFirst(2) {
+            if token == "--voice-processing" {
+                forceVoiceProcessing = true
+                continue
+            }
+            if token == "--no-voice-processing" {
+                forceVoiceProcessing = false
+                continue
+            }
+            if let parsed = Double(token) {
+                seconds = parsed
+                continue
+            }
+        }
+    }
+    debugLog("stream-record: socket=\(socketPath) seconds=\(seconds) forceVoiceProcessing=\(String(describing: forceVoiceProcessing))")
 
     if !checkPermission() {
         debugLog("stream-record: permission not granted")
@@ -884,7 +1087,7 @@ case "stream-record":
     debugLog("stream-record: permission already granted")
 
     let recorder = StreamRecorder()
-    let ok = recorder.stream(seconds: seconds, socketPath: socketPath)
+    let ok = recorder.stream(seconds: seconds, socketPath: socketPath, forceVoiceProcessing: forceVoiceProcessing)
     debugLog("stream-record: finished ok=\(ok)")
     exit(ok ? 0 : 1)
 
@@ -895,10 +1098,12 @@ case "hud":
         exit(2)
     }
     let socketPath = argList[1]
+    claimHudSingleton()
+    let selfPid = Int32(getpid())
 
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
-    let delegate = HudAppDelegate(socketPath: socketPath)
+    let delegate = HudAppDelegate(socketPath: socketPath, ownerPid: selfPid)
     app.delegate = delegate
     app.run()
     exit(0)

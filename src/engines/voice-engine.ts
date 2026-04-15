@@ -141,6 +141,12 @@ function getTtsPlaybackVolumePercent(config: ReturnType<typeof getConfig>): numb
   return Math.round((masterVolume / 100) * (ttsVolume / 100) * 100);
 }
 
+function applyVolumeBoost(basePercent: number, boost?: number): number {
+  if (!Number.isFinite(boost)) return basePercent;
+  const factor = Math.max(0.5, Math.min(2.2, boost as number));
+  return Math.max(0, Math.min(220, Math.round(basePercent * factor)));
+}
+
 function float32ToInt16Pcm(samples: Float32Array): Int16Array {
   const pcm = new Int16Array(samples.length);
   for (let i = 0; i < samples.length; i++) {
@@ -263,6 +269,7 @@ async function decodeAudioFileToPcm16kMono(filePath: string): Promise<Int16Array
 interface SpeakOptions {
   force?: boolean;
   onPlaybackStart?: () => void;
+  volumeBoost?: number;
 }
 
 // --- Public API ---
@@ -295,7 +302,7 @@ export async function speak(text: string, options: SpeakOptions = {}): Promise<v
     } catch (err) {
       // All providers failed, try system fallback
       try {
-        await speakSystemFallback(stripEmotionTags(text), options.onPlaybackStart);
+        await speakSystemFallback(stripEmotionTags(text), options.onPlaybackStart, options.volumeBoost);
       } catch { /* truly silent failure */ }
     }
   });
@@ -310,7 +317,7 @@ async function speakLocal(text: string, options: SpeakOptions = {}): Promise<voi
   // Kokoro via sherpa-onnx-node (no emotion tags)
   if (engine === 'kokoro') {
     const cleanText = stripEmotionTags(text);
-    await speakViaSherpa(cleanText, options.onPlaybackStart);
+    await speakViaSherpa(cleanText, options.onPlaybackStart, options.volumeBoost);
     return;
   }
 
@@ -319,16 +326,20 @@ async function speakLocal(text: string, options: SpeakOptions = {}): Promise<voi
   if (engine === 'orpheus') {
     // Try Kokoro as fallback for now, strip emotion tags
     try {
-      await speakViaSherpa(stripEmotionTags(text), options.onPlaybackStart);
+      await speakViaSherpa(stripEmotionTags(text), options.onPlaybackStart, options.volumeBoost);
       return;
     } catch { /* fall through */ }
   }
 
   // System TTS fallback
-  await speakSystemFallback(stripEmotionTags(text), options.onPlaybackStart);
+  await speakSystemFallback(stripEmotionTags(text), options.onPlaybackStart, options.volumeBoost);
 }
 
-async function speakViaSherpa(text: string, onPlaybackStart?: () => void): Promise<void> {
+async function speakViaSherpa(
+  text: string,
+  onPlaybackStart?: () => void,
+  volumeBoost?: number,
+): Promise<void> {
   const s = getSherpa();
   if (!s) {
     throw new Error('sherpa-onnx-node not available');
@@ -384,7 +395,7 @@ async function speakViaSherpa(text: string, onPlaybackStart?: () => void): Promi
   s.writeWave(tempFile, { samples: audio.samples, sampleRate: audio.sampleRate });
   const echoPcm = float32ToInt16Pcm(audio.samples);
 
-  const vol = getTtsPlaybackVolumePercent(config);
+  const vol = applyVolumeBoost(getTtsPlaybackVolumePercent(config), volumeBoost);
   await warmupAudioOutputIfNeeded();
   const playbackStartAt = Date.now();
   registerTtsPlaybackReference(echoPcm, audio.sampleRate, playbackStartAt);
@@ -437,7 +448,7 @@ async function speakCloud(text: string, options: SpeakOptions = {}): Promise<voi
   ]);
 
   fs.writeFileSync(tempFile, audioBuffer);
-  const vol = getTtsPlaybackVolumePercent(config);
+  const vol = applyVolumeBoost(getTtsPlaybackVolumePercent(config), options.volumeBoost);
   await warmupAudioOutputIfNeeded();
   const playbackStartAt = Date.now();
   if (eagerEchoPcm) {
@@ -594,7 +605,11 @@ function resolveVolcVoice(voice: string, text: string): string {
 
 // --- System Fallback ---
 
-async function speakSystemFallback(text: string, onPlaybackStart?: () => void): Promise<void> {
+async function speakSystemFallback(
+  text: string,
+  onPlaybackStart?: () => void,
+  volumeBoost?: number,
+): Promise<void> {
   const platform = os.platform();
   const config = getConfig();
   clearTtsPlaybackReference();
@@ -622,7 +637,7 @@ async function speakSystemFallback(text: string, onPlaybackStart?: () => void): 
         waitMs(ECHO_DECODE_TIMEOUT_MS).then(() => null),
       ]);
 
-      const vol = getTtsPlaybackVolumePercent(config);
+      const vol = applyVolumeBoost(getTtsPlaybackVolumePercent(config), volumeBoost);
       await warmupAudioOutputIfNeeded();
       const playbackStartAt = Date.now();
       if (eagerEchoPcm) {

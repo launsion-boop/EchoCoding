@@ -1,7 +1,7 @@
 const TARGET_SAMPLE_RATE = 16_000;
 const ACTIVE_LEAD_MS = 120;
-const ACTIVE_TAIL_MS = 900;
-const REF_KEEP_AFTER_TAIL_MS = 3_200;
+const ACTIVE_TAIL_MS = 3_200;
+const REF_KEEP_AFTER_TAIL_MS = 5_200;
 const REF_HISTORY_LIMIT = 3;
 
 const MIN_CHUNK_SAMPLES = 160; // 10ms @ 16kHz
@@ -15,18 +15,18 @@ const RMS_RATIO_MAX = 22.0;
 const ALPHA_ABS_MIN = 0.0025;
 const ALPHA_ABS_MAX = 28.0;
 
-const SEARCH_LATE_MS = 1_800; // playback -> mic path latency allowance
+const SEARCH_LATE_MS = 5_200; // playback -> mic path latency allowance
 const SEARCH_LEAD_MS = 80; // jitter / clock skew allowance
 const SEARCH_STEP_SAMPLES = 80; // 5ms @ 16kHz
 const LOCKED_SEARCH_STEP_SAMPLES = 32; // 2ms @ 16kHz
 const LOCKED_SEARCH_RADIUS_SAMPLES = 480; // 30ms @ 16kHz
-const MATCH_LOCK_MAX_AGE_MS = 1_600;
+const MATCH_LOCK_MAX_AGE_MS = 4_200;
 
 const NLMS_TAP_COUNT = 96;
 const NLMS_STEP_SIZE = 0.22;
 const NLMS_EPSILON = 1.0e9;
 const NLMS_WEIGHT_LIMIT = 32.0;
-const SOFT_SUPPRESS_MIN_GAIN = 0.4;
+const SOFT_SUPPRESS_MIN_GAIN = 0.28;
 
 interface PlaybackReference {
   id: number;
