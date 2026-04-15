@@ -363,11 +363,12 @@ function handleAsrStreamSession(client, req) {
 
   let done = false;
   let started = false;
+  let startReceived = false;
   let endedByClient = false;
   let configSent = false;
   let finalSentToUpstream = false;
   let language = 'zh-CN';
-  let format = 'wav';
+  let format = 'pcm';
   let accumulatedText = '';
   const queuedAudio = [];
   const MAX_QUEUED_AUDIO = 2 * 1024 * 1024;
@@ -404,7 +405,7 @@ function handleAsrStreamSession(client, req) {
   };
 
   const sendConfigIfReady = () => {
-    if (configSent || upstream.readyState !== WS.OPEN) return;
+    if (configSent || upstream.readyState !== WS.OPEN || !startReceived) return;
     const payload = Buffer.from(createVolcAsrConfigPayload(format, language), 'utf-8');
     upstream.send(buildV3Frame(0x1, 0x0, 0x1, payload));
     configSent = true;
@@ -430,6 +431,7 @@ function handleAsrStreamSession(client, req) {
   const forwardAudioChunk = (chunk) => {
     if (done || endedByClient) return;
     started = true;
+    if (!startReceived) startReceived = true;
     if (upstream.readyState === WS.OPEN && !configSent) {
       sendConfigIfReady();
     }
@@ -496,6 +498,7 @@ function handleAsrStreamSession(client, req) {
 
     if (msg?.type === 'start') {
       started = true;
+      startReceived = true;
       if (typeof msg.language === 'string') language = msg.language;
       if (msg.audio && typeof msg.audio.format === 'string') {
         format = normalizeStreamFormat(msg.audio.format);
@@ -507,6 +510,7 @@ function handleAsrStreamSession(client, req) {
     if (msg?.type === 'end') {
       endedByClient = true;
       if (!started) started = true;
+      if (!startReceived) startReceived = true;
       sendConfigIfReady();
       sendFinalMarker();
       return;
