@@ -349,17 +349,22 @@ class StreamRecorder: NSObject {
 // MARK: - Floating HUD
 
 final class HudOverlayController: NSObject {
+    private let statusDotIntervalMs: Int = 350
+    private let cursorBlinkIntervalMs: Int = 500
+    private let userLinePrefix = "YOU: "
     private let socketFd: Int32
     private var fdClosed = false
     private var window: NSPanel?
     private var statusLabel: NSTextField?
     private var conversationView: NSTextView?
+    private var draftLineLabel: NSTextField?
     private var conversationLines: [String] = []
     private var currentUserDraft: String?
     private var userDraftActive = true
     private var userCursorVisible = true
     private var readSource: DispatchSourceRead?
-    private var animationTimer: DispatchSourceTimer?
+    private var statusAnimationTimer: DispatchSourceTimer?
+    private var cursorBlinkTimer: DispatchSourceTimer?
     private var readBuffer = Data()
     private var baseStatus = "Listening"
     private var isAnimating = false
@@ -376,16 +381,20 @@ final class HudOverlayController: NSObject {
     func start() {
         setupWindow()
         startReadLoop()
-        startAnimationTimer()
+        startStatusAnimationTimer()
+        startCursorBlinkTimer()
         updateStatusUI()
+        ensureUserDraftVisible(force: true)
         renderConversation()
     }
 
     func shutdown() {
         readSource?.cancel()
         readSource = nil
-        animationTimer?.cancel()
-        animationTimer = nil
+        statusAnimationTimer?.cancel()
+        statusAnimationTimer = nil
+        cursorBlinkTimer?.cancel()
+        cursorBlinkTimer = nil
         closeFdIfNeeded()
     }
 
@@ -443,7 +452,16 @@ final class HudOverlayController: NSObject {
         timelineHeader.frame = NSRect(x: 18, y: height - 84, width: width - 36, height: 14)
         content.addSubview(timelineHeader)
 
-        let scrollFrame = NSRect(x: 18, y: 14, width: width - 36, height: height - 104)
+        let draftFrame = NSRect(x: 18, y: 12, width: width - 36, height: 24)
+        let draftLabel = NSTextField(labelWithString: "\(userLinePrefix)|")
+        draftLabel.font = NSFont.monospacedSystemFont(ofSize: 15, weight: .regular)
+        draftLabel.textColor = NSColor(calibratedWhite: 0.98, alpha: 1.0)
+        draftLabel.frame = draftFrame
+        draftLabel.lineBreakMode = .byTruncatingTail
+        content.addSubview(draftLabel)
+        self.draftLineLabel = draftLabel
+
+        let scrollFrame = NSRect(x: 18, y: 40, width: width - 36, height: height - 130)
         let scrollView = NSScrollView(frame: scrollFrame)
         scrollView.borderType = .noBorder
         scrollView.hasVerticalScroller = false
@@ -536,23 +554,69 @@ final class HudOverlayController: NSObject {
         renderConversation()
     }
 
+    private func ensureUserDraftVisible(force: Bool = false) {
+        if !force && sawTerminalMessage { return }
+        if currentUserDraft == nil {
+            currentUserDraft = ""
+        }
+        userDraftActive = true
+        userCursorVisible = true
+    }
+
     private func renderConversation() {
         guard let view = conversationView else { return }
-        var lines = conversationLines
-        if userDraftActive {
-            let draft = currentUserDraft?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let cursor = userCursorVisible ? "|" : " "
-            lines.append("You: \(draft)\(cursor)")
-        } else if let draft = currentUserDraft?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !draft.isEmpty {
-            lines.append("You: \(draft)")
+        let baseFont = NSFont.monospacedSystemFont(ofSize: 15, weight: .regular)
+        let baseAttrs: [NSAttributedString.Key: Any] = [
+            .font: baseFont,
+            .foregroundColor: NSColor(calibratedWhite: 0.9, alpha: 1.0),
+        ]
+        let focusedAttrs: [NSAttributedString.Key: Any] = [
+            .font: baseFont,
+            .foregroundColor: NSColor(calibratedRed: 0.97, green: 0.99, blue: 1.0, alpha: 1.0),
+        ]
+        let cursorAttrs: [NSAttributedString.Key: Any] = [
+            .font: baseFont,
+            .foregroundColor: NSColor(calibratedRed: 0.72, green: 0.9, blue: 1.0, alpha: 1.0),
+        ]
+
+        let composed = NSMutableAttributedString()
+
+        func appendLine(_ line: NSAttributedString) {
+            if composed.length > 0 {
+                composed.append(NSAttributedString(string: "\n", attributes: baseAttrs))
+            }
+            composed.append(line)
         }
-        if lines.isEmpty {
-            view.string = "AI: Waiting for voice..."
-        } else {
-            view.string = lines.joined(separator: "\n")
+
+        for line in conversationLines {
+            appendLine(NSAttributedString(string: line, attributes: baseAttrs))
         }
-        view.scrollToEndOfDocument(nil)
+
+        if composed.length == 0 {
+            composed.append(NSAttributedString(string: "AI: Waiting for voice...", attributes: baseAttrs))
+        }
+
+        view.textStorage?.setAttributedString(composed)
+        let endRange = NSRange(location: max(0, composed.length - 1), length: min(1, composed.length))
+        view.scrollRangeToVisible(endRange)
+
+        if let label = draftLineLabel {
+            if userDraftActive {
+                let draft = currentUserDraft?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let line = NSMutableAttributedString(string: "\(userLinePrefix)\(draft)", attributes: focusedAttrs)
+                let cursor = userCursorVisible ? "|" : " "
+                line.append(NSAttributedString(string: cursor, attributes: cursorAttrs))
+                label.attributedStringValue = line
+            } else if let draft = currentUserDraft?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !draft.isEmpty {
+                label.attributedStringValue = NSAttributedString(
+                    string: "\(userLinePrefix)\(draft)",
+                    attributes: baseAttrs
+                )
+            } else {
+                label.attributedStringValue = NSAttributedString(string: "")
+            }
+        }
     }
 
     private func handleHudMessage(_ msg: [String: Any]) {
@@ -574,6 +638,7 @@ final class HudOverlayController: NSObject {
             renderConversation()
             updateStatusUI()
         case "prompt":
+            ensureUserDraftVisible(force: true)
             let text = (msg["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if !text.isEmpty {
                 appendConversationLine("AI: \(text)")
@@ -582,12 +647,7 @@ final class HudOverlayController: NSObject {
             baseStatus = (msg["text"] as? String) ?? baseStatus
             isAnimating = (msg["animate"] as? Bool) ?? false
             dotCount = 0
-            if !sawTerminalMessage {
-                userDraftActive = true
-                if currentUserDraft == nil {
-                    currentUserDraft = ""
-                }
-            }
+            ensureUserDraftVisible(force: true)
             updateStatusUI()
             renderConversation()
         case "partial":
@@ -607,7 +667,7 @@ final class HudOverlayController: NSObject {
             let rawText = (msg["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let text = rawText == "[empty]" ? "未识别到清晰语音" : rawText
             if !text.isEmpty {
-                appendConversationLine("You: \(text)")
+                appendConversationLine("\(userLinePrefix)\(text)")
             }
             currentUserDraft = nil
             userDraftActive = false
@@ -646,21 +706,35 @@ final class HudOverlayController: NSObject {
         }
     }
 
-    private func startAnimationTimer() {
+    private func startStatusAnimationTimer() {
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.main)
-        timer.schedule(deadline: .now() + .milliseconds(350), repeating: .milliseconds(350))
+        timer.schedule(
+            deadline: .now() + .milliseconds(statusDotIntervalMs),
+            repeating: .milliseconds(statusDotIntervalMs)
+        )
         timer.setEventHandler { [weak self] in
             guard let self = self else { return }
-            if self.isAnimating {
-                self.dotCount = (self.dotCount + 1) % 4
-                self.updateStatusUI()
-            }
-            if self.userDraftActive {
-                self.userCursorVisible.toggle()
-                self.renderConversation()
-            }
+            guard self.isAnimating else { return }
+            self.dotCount = (self.dotCount + 1) % 4
+            self.updateStatusUI()
         }
-        animationTimer = timer
+        statusAnimationTimer = timer
+        timer.resume()
+    }
+
+    private func startCursorBlinkTimer() {
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.main)
+        timer.schedule(
+            deadline: .now() + .milliseconds(cursorBlinkIntervalMs),
+            repeating: .milliseconds(cursorBlinkIntervalMs)
+        )
+        timer.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            guard self.userDraftActive else { return }
+            self.userCursorVisible.toggle()
+            self.renderConversation()
+        }
+        cursorBlinkTimer = timer
         timer.resume()
     }
 

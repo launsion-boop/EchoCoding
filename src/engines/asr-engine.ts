@@ -26,7 +26,8 @@ const ASK_GATE_QUIET_MS = 100;
 const ASK_GATE_MAX_WAIT_MS = 280;
 const ASK_GATE_QUIET_FACTOR = 0.75;
 const ASK_TTS_START_GATE_TIMEOUT_MS = 1_500;
-const ASK_TTS_START_ANTIBLEED_MS = 140;
+const ASK_TTS_START_ANTIBLEED_MS = 260;
+const ASK_PROMPT_ECHO_RETRY_MAX = 2;
 const ECHO_ONLY_RMS_RATIO_MAX = 0.72;
 const ECHO_DOUBLE_TALK_RMS_FACTOR = 1.22;
 const ASK_LOCK_DIR = path.join(os.tmpdir(), 'echocoding-ask.lock');
@@ -243,6 +244,51 @@ function createNoopHudController(): AsrHudController {
 
 function delayMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeEchoText(text: string): string {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/[\s\p{P}\p{S}]+/gu, '');
+}
+
+function computeCharOverlap(a: string, b: string): number {
+  if (!a || !b) return 0;
+  const counts = new Map<string, number>();
+  for (const ch of b) {
+    counts.set(ch, (counts.get(ch) ?? 0) + 1);
+  }
+
+  let overlap = 0;
+  for (const ch of a) {
+    const count = counts.get(ch) ?? 0;
+    if (count <= 0) continue;
+    overlap += 1;
+    counts.set(ch, count - 1);
+  }
+  return overlap;
+}
+
+function isLikelyPromptEcho(recognizedText: string, promptText: string): boolean {
+  if (!recognizedText || !promptText) return false;
+  const recognized = normalizeEchoText(recognizedText);
+  const prompt = normalizeEchoText(promptText);
+  if (!recognized || !prompt) return false;
+  if (recognized.length < 5 || prompt.length < 5) return false;
+
+  if (recognized === prompt) return true;
+  if (prompt.includes(recognized) && recognized.length >= Math.max(5, Math.floor(prompt.length * 0.55))) {
+    return true;
+  }
+  if (recognized.includes(prompt) && prompt.length >= Math.max(5, Math.floor(recognized.length * 0.55))) {
+    return true;
+  }
+
+  const overlap = computeCharOverlap(recognized, prompt);
+  const recognizedRatio = overlap / recognized.length;
+  const promptRatio = overlap / prompt.length;
+  return recognizedRatio >= 0.9 && promptRatio >= 0.5;
 }
 
 function isProcessRunning(pid: number): boolean {
@@ -684,30 +730,6 @@ export async function ask(question: string, timeoutSec?: number): Promise<string
     try {
       hud.reset();
 
-      const listenPromise = listenWithHud(
-        effectiveTimeout,
-        {
-          hud: hudEnabled,
-          skipReadyCue: true,
-          askSession: hudEnabled && supportsSharedAskHud(),
-          startGate: {
-            ready: startGateReady,
-            antiBleedMs: ASK_TTS_START_ANTIBLEED_MS,
-          },
-          // Ask mode: if there is no clear response, keep channel open up to 60s.
-          vadOverrides: {
-            // Favor responsiveness during interactive ask.
-            silenceMs: 800,
-            minSpeechMs: 350,
-            noSpeechTimeoutMs: effectiveTimeout * 1000,
-            maxDurationMs: effectiveTimeout * 1000,
-          },
-        },
-        hud,
-      );
-      // Keep rejection handling attached while TTS is still playing.
-      listenPromise.catch(() => { /* handled below */ });
-
       // HUD appears and recording starts immediately; users can answer right away.
       hud.updateStatus('Assistant speaking', true);
       let promptShown = false;
@@ -727,10 +749,61 @@ export async function ask(question: string, timeoutSec?: number): Promise<string
         }
       });
 
-      let result = await listenPromise;
-      if (result === '[empty]') {
-        result = '[timeout]';
+      const askDeadlineAt = Date.now() + (effectiveTimeout * 1000);
+      let result = '[timeout]';
+      let useStartGate = true;
+      let echoRetryCount = 0;
+      while (true) {
+        const remainingMs = askDeadlineAt - Date.now();
+        if (remainingMs <= 900) {
+          result = '[timeout]';
+          break;
+        }
+
+        const listenPromise = listenWithHud(
+          Math.max(1, Math.ceil(remainingMs / 1000)),
+          {
+            hud: hudEnabled,
+            skipReadyCue: true,
+            askSession: hudEnabled && supportsSharedAskHud(),
+            startGate: useStartGate ? {
+              ready: startGateReady,
+              antiBleedMs: ASK_TTS_START_ANTIBLEED_MS,
+            } : undefined,
+            // Ask mode: if there is no clear response, keep channel open up to timeout.
+            vadOverrides: {
+              // Favor responsiveness during interactive ask.
+              silenceMs: 800,
+              minSpeechMs: 350,
+              noSpeechTimeoutMs: remainingMs,
+              maxDurationMs: remainingMs,
+            },
+          },
+          hud,
+        );
+        // Keep rejection handling attached while TTS is still playing.
+        listenPromise.catch(() => { /* handled below */ });
+        let attemptResult = await listenPromise;
+        if (attemptResult === '[empty]') {
+          attemptResult = '[timeout]';
+        }
+        if (!prompt || !isLikelyPromptEcho(attemptResult, prompt)) {
+          result = attemptResult;
+          break;
+        }
+
+        // Detected prompt echo. Keep listening inside the same ASK session.
+        echoRetryCount += 1;
+        if (echoRetryCount > ASK_PROMPT_ECHO_RETRY_MAX) {
+          result = '[timeout]';
+          break;
+        }
+        try { await speakTask; } catch { /* ignore */ }
+        hud.updateStatus('Listening', true);
+        hud.updatePartial('');
+        useStartGate = false;
       }
+
       void speakTask;
       forceCloseHud = (
         result === '[timeout]' ||
