@@ -296,7 +296,7 @@ class StreamRecorder: NSObject {
             sem.signal()
         }
 
-        input.installTap(onBus: 0, bufferSize: 2048, format: hwFormat) { buffer, _ in
+        input.installTap(onBus: 0, bufferSize: 1024, format: hwFormat) { buffer, _ in
             if finished { return }
 
             let frameCount = AVAudioFrameCount(
@@ -356,6 +356,8 @@ final class HudOverlayController: NSObject {
     private var conversationView: NSTextView?
     private var conversationLines: [String] = []
     private var currentUserDraft: String?
+    private var userDraftActive = true
+    private var userCursorVisible = true
     private var readSource: DispatchSourceRead?
     private var animationTimer: DispatchSourceTimer?
     private var readBuffer = Data()
@@ -376,6 +378,7 @@ final class HudOverlayController: NSObject {
         startReadLoop()
         startAnimationTimer()
         updateStatusUI()
+        renderConversation()
     }
 
     func shutdown() {
@@ -536,9 +539,13 @@ final class HudOverlayController: NSObject {
     private func renderConversation() {
         guard let view = conversationView else { return }
         var lines = conversationLines
-        if let draft = currentUserDraft?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !draft.isEmpty {
-            lines.append("You: \(draft) ...")
+        if userDraftActive {
+            let draft = currentUserDraft?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let cursor = userCursorVisible ? "|" : " "
+            lines.append("You: \(draft)\(cursor)")
+        } else if let draft = currentUserDraft?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !draft.isEmpty {
+            lines.append("You: \(draft)")
         }
         if lines.isEmpty {
             view.string = "AI: Waiting for voice..."
@@ -558,7 +565,9 @@ final class HudOverlayController: NSObject {
             baseStatus = "Preparing"
             isAnimating = true
             dotCount = 0
-            currentUserDraft = nil
+            currentUserDraft = ""
+            userDraftActive = true
+            userCursorVisible = true
             if (msg["clear"] as? Bool) == true {
                 conversationLines.removeAll(keepingCapacity: true)
             }
@@ -573,12 +582,21 @@ final class HudOverlayController: NSObject {
             baseStatus = (msg["text"] as? String) ?? baseStatus
             isAnimating = (msg["animate"] as? Bool) ?? false
             dotCount = 0
+            if !sawTerminalMessage {
+                userDraftActive = true
+                if currentUserDraft == nil {
+                    currentUserDraft = ""
+                }
+            }
             updateStatusUI()
+            renderConversation()
         case "partial":
             let text = (msg["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            currentUserDraft = text
+            userDraftActive = true
+            userCursorVisible = true
+            renderConversation()
             if !text.isEmpty {
-                currentUserDraft = text
-                renderConversation()
                 debugLog("hud: partial text=\(String(text.prefix(120)))")
             }
         case "final":
@@ -592,6 +610,8 @@ final class HudOverlayController: NSObject {
                 appendConversationLine("You: \(text)")
             }
             currentUserDraft = nil
+            userDraftActive = false
+            userCursorVisible = false
             renderConversation()
             debugLog("hud: final text=\(String(text.prefix(120)))")
             updateStatusUI()
@@ -601,6 +621,8 @@ final class HudOverlayController: NSObject {
             isAnimating = false
             dotCount = 0
             currentUserDraft = nil
+            userDraftActive = false
+            userCursorVisible = false
             appendConversationLine("System: No speech detected")
             debugLog("hud: timeout")
             updateStatusUI()
@@ -611,6 +633,8 @@ final class HudOverlayController: NSObject {
             dotCount = 0
             let text = (msg["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             currentUserDraft = nil
+            userDraftActive = false
+            userCursorVisible = false
             appendConversationLine(text.isEmpty ? "System: ASR error" : "System: \(text)")
             debugLog("hud: error text=\(String(text.prefix(120)))")
             updateStatusUI()
@@ -627,9 +651,14 @@ final class HudOverlayController: NSObject {
         timer.schedule(deadline: .now() + .milliseconds(350), repeating: .milliseconds(350))
         timer.setEventHandler { [weak self] in
             guard let self = self else { return }
-            guard self.isAnimating else { return }
-            self.dotCount = (self.dotCount + 1) % 4
-            self.updateStatusUI()
+            if self.isAnimating {
+                self.dotCount = (self.dotCount + 1) % 4
+                self.updateStatusUI()
+            }
+            if self.userDraftActive {
+                self.userCursorVisible.toggle()
+                self.renderConversation()
+            }
         }
         animationTimer = timer
         timer.resume()

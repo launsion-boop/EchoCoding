@@ -28,7 +28,7 @@ function getSherpa(): typeof import('sherpa-onnx-node') | null {
 const TEMP_DIR = path.join(os.tmpdir(), 'echocoding-tts');
 const TTS_WARMUP_INTERVAL_MS = 3_000;
 const TTS_WARMUP_SILENCE_MS = 90;
-const ECHO_DECODE_TIMEOUT_MS = 420;
+const ECHO_DECODE_TIMEOUT_MS = 1_200;
 
 // Singleton TTS instance (reused across calls)
 let ttsInstance: InstanceType<typeof import('sherpa-onnx-node').OfflineTts> | null = null;
@@ -130,6 +130,17 @@ function waitMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function clampPercent(value: number | undefined, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(0, Math.min(100, Math.round(value as number)));
+}
+
+function getTtsPlaybackVolumePercent(config: ReturnType<typeof getConfig>): number {
+  const masterVolume = clampPercent(config.volume, 70);
+  const ttsVolume = clampPercent(config.tts.volume, 100);
+  return Math.round((masterVolume / 100) * (ttsVolume / 100) * 100);
+}
+
 function float32ToInt16Pcm(samples: Float32Array): Int16Array {
   const pcm = new Int16Array(samples.length);
   for (let i = 0; i < samples.length; i++) {
@@ -141,7 +152,7 @@ function float32ToInt16Pcm(samples: Float32Array): Int16Array {
 
 async function decodeCompressedToPcm16kMono(
   audioBuffer: Buffer,
-  inputFormat: 'mp3' | 'wav' = 'mp3',
+  inputFormat: 'mp3' | 'wav' | 'aiff' = 'mp3',
 ): Promise<Int16Array | null> {
   return new Promise((resolve) => {
     const args = [
@@ -196,6 +207,56 @@ async function decodeCompressedToPcm16kMono(
     } catch {
       finish(null);
     }
+  });
+}
+
+async function decodeAudioFileToPcm16kMono(filePath: string): Promise<Int16Array | null> {
+  return new Promise((resolve) => {
+    const args = [
+      '-hide_banner',
+      '-loglevel', 'error',
+      '-i', filePath,
+      '-f', 's16le',
+      '-ac', '1',
+      '-ar', '16000',
+      'pipe:1',
+    ];
+
+    const ffmpeg = spawn('ffmpeg', args, {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+
+    const chunks: Buffer[] = [];
+    let settled = false;
+
+    const finish = (pcm: Int16Array | null) => {
+      if (settled) return;
+      settled = true;
+      resolve(pcm);
+    };
+
+    ffmpeg.stdout?.on('data', (chunk: Buffer) => {
+      if (chunk.length > 0) chunks.push(Buffer.from(chunk));
+    });
+
+    ffmpeg.on('error', () => finish(null));
+    ffmpeg.on('close', (code) => {
+      if (code !== 0) {
+        finish(null);
+        return;
+      }
+      const raw = Buffer.concat(chunks);
+      if (raw.length < 2) {
+        finish(null);
+        return;
+      }
+      const sampleCount = Math.floor(raw.length / 2);
+      const pcm = new Int16Array(sampleCount);
+      for (let i = 0; i < sampleCount; i++) {
+        pcm[i] = raw.readInt16LE(i * 2);
+      }
+      finish(pcm);
+    });
   });
 }
 
@@ -323,7 +384,7 @@ async function speakViaSherpa(text: string, onPlaybackStart?: () => void): Promi
   s.writeWave(tempFile, { samples: audio.samples, sampleRate: audio.sampleRate });
   const echoPcm = float32ToInt16Pcm(audio.samples);
 
-  const vol = Math.round((config.volume / 100) * 100);
+  const vol = getTtsPlaybackVolumePercent(config);
   await warmupAudioOutputIfNeeded();
   const playbackStartAt = Date.now();
   registerTtsPlaybackReference(echoPcm, audio.sampleRate, playbackStartAt);
@@ -376,7 +437,7 @@ async function speakCloud(text: string, options: SpeakOptions = {}): Promise<voi
   ]);
 
   fs.writeFileSync(tempFile, audioBuffer);
-  const vol = Math.round((config.volume / 100) * 100);
+  const vol = getTtsPlaybackVolumePercent(config);
   await warmupAudioOutputIfNeeded();
   const playbackStartAt = Date.now();
   if (eagerEchoPcm) {
@@ -540,21 +601,64 @@ async function speakSystemFallback(text: string, onPlaybackStart?: () => void): 
 
   if (platform === 'darwin') {
     const rate = Math.round(180 * config.tts.speed);
+    fs.mkdirSync(TEMP_DIR, { recursive: true });
+    const tempFile = path.join(
+      TEMP_DIR,
+      `tts-system-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}.aiff`,
+    );
+
+    const rendered = await new Promise<boolean>((resolve) => {
+      const child = spawn('say', ['-r', String(rate), '-o', tempFile, text], {
+        stdio: 'ignore',
+      });
+      child.on('error', () => resolve(false));
+      child.on('close', (code) => resolve(code === 0));
+    });
+
+    if (rendered && fs.existsSync(tempFile)) {
+      const echoDecodePromise = decodeAudioFileToPcm16kMono(tempFile).catch(() => null);
+      const eagerEchoPcm = await Promise.race<Int16Array | null>([
+        echoDecodePromise,
+        waitMs(ECHO_DECODE_TIMEOUT_MS).then(() => null),
+      ]);
+
+      const vol = getTtsPlaybackVolumePercent(config);
+      await warmupAudioOutputIfNeeded();
+      const playbackStartAt = Date.now();
+      if (eagerEchoPcm) {
+        registerTtsPlaybackReference(eagerEchoPcm, 16_000, playbackStartAt);
+      } else {
+        void echoDecodePromise.then((pcm) => {
+          if (!pcm) return;
+          registerTtsPlaybackReference(pcm, 16_000, playbackStartAt);
+        }).catch(() => { /* ignore echo reference decode failure */ });
+      }
+      onPlaybackStart?.();
+      await playAudioFileAsync(tempFile, vol);
+      setTimeout(() => {
+        try { fs.unlinkSync(tempFile); } catch { /* ignore */ }
+      }, 5_000);
+      return;
+    }
+
     await warmupAudioOutputIfNeeded();
     onPlaybackStart?.();
-    const child = spawn('say', ['-r', String(rate), text], {
-      stdio: 'ignore',
-      detached: true,
+    await new Promise<void>((resolve) => {
+      const child = spawn('say', ['-r', String(rate), text], {
+        stdio: 'ignore',
+      });
+      child.on('error', () => resolve());
+      child.on('close', () => resolve());
     });
-    child.unref();
   } else if (platform === 'linux') {
     onPlaybackStart?.();
-    const child = spawn('espeak', [text], {
-      stdio: 'ignore',
-      detached: true,
+    await new Promise<void>((resolve) => {
+      const child = spawn('espeak', [text], {
+        stdio: 'ignore',
+      });
+      child.on('error', () => resolve());
+      child.on('close', () => resolve());
     });
-    child.on('error', () => { /* not available */ });
-    child.unref();
   }
 }
 

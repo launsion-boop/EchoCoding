@@ -420,6 +420,32 @@
     return PREVIEW_TEXT_DEFAULTS[resolvePreviewLanguage(lang)];
   }
 
+  function clampPercent(value, fallback = 100) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return fallback;
+    return Math.max(0, Math.min(100, num));
+  }
+
+  function getMasterVolumePercent() {
+    return clampPercent(config.volume, 70);
+  }
+
+  function getVoiceVolumePercent() {
+    return clampPercent(config.tts?.volume, 100);
+  }
+
+  function getPromptToneVolumePercent() {
+    return clampPercent(config.sfx?.volume, 80);
+  }
+
+  function getVoicePreviewGain() {
+    return Math.max(0, Math.min(1, (getMasterVolumePercent() / 100) * (getVoiceVolumePercent() / 100)));
+  }
+
+  function getSfxPreviewGain() {
+    return Math.max(0, Math.min(1, (getMasterVolumePercent() / 100) * (getPromptToneVolumePercent() / 100)));
+  }
+
   function syncPreviewTextWithLanguage(lang) {
     const input = document.getElementById('previewText');
     if (!input) return;
@@ -560,6 +586,7 @@
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       playingAudio = new Audio(url);
+      playingAudio.volume = getVoicePreviewGain();
       playingAudio.onended = () => {
         if (card) card.classList.remove('playing');
         playingAudio = null;
@@ -608,6 +635,7 @@
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       playingAudio = new Audio(url);
+      playingAudio.volume = getSfxPreviewGain();
       playingAudio.onended = () => {
         if (el) el.classList.remove('playing');
         playingAudio = null;
@@ -628,10 +656,24 @@
     // General settings (always visible)
     document.getElementById('settingsGeneral').innerHTML = `
       <div class="setting-item">
-        <label>Volume</label>
+        <label>Master Volume</label>
         <div class="slider-row">
           <input type="range" min="0" max="100" value="${config.volume || 70}" oninput="updateSetting('volume', this.value); this.nextElementSibling.textContent = this.value">
           <span class="slider-val">${config.volume || 70}</span>
+        </div>
+      </div>
+      <div class="setting-item">
+        <label>Voice Broadcast Volume</label>
+        <div class="slider-row">
+          <input type="range" min="0" max="100" value="${config.tts?.volume ?? 100}" oninput="updateSetting('tts.volume', this.value); this.nextElementSibling.textContent = this.value">
+          <span class="slider-val">${config.tts?.volume ?? 100}</span>
+        </div>
+      </div>
+      <div class="setting-item">
+        <label>Prompt Tone Volume</label>
+        <div class="slider-row">
+          <input type="range" min="0" max="100" value="${config.sfx?.volume ?? 80}" oninput="updateSetting('sfx.volume', this.value); this.nextElementSibling.textContent = this.value">
+          <span class="slider-val">${config.sfx?.volume ?? 80}</span>
         </div>
       </div>
       <div class="setting-item">
@@ -863,6 +905,7 @@
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       playingAudio = new Audio(url);
+      playingAudio.volume = getVoicePreviewGain();
       playingAudio.onended = () => {
         if (card) card.classList.remove('playing');
         playingAudio = null;
