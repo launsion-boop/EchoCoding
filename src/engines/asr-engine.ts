@@ -25,14 +25,26 @@ const ASK_SHARED_MIC_MAX_SEC = 30 * 60;
 const ASK_GATE_QUIET_MS = 100;
 const ASK_GATE_MAX_WAIT_MS = 280;
 const ASK_GATE_QUIET_FACTOR = 0.75;
-const ASK_TTS_POST_ECHO_GUARD_MS = 1_800;
+const ASK_TTS_POST_ECHO_GUARD_MS = 3_200;
 const ASK_PROMPT_ECHO_RETRY_MAX = 2;
-const ASK_RECOVERABLE_ERROR_RETRY_MAX = 3;
+const ASK_RECOVERABLE_ERROR_RETRY_MAX = 6;
 const ASK_RECOVERABLE_ERROR_BACKOFF_MS = 180;
-const ASK_NON_ECHO_VOICE_MIN_MS = 220;
-const ASK_STRICT_NON_ECHO_RATIO_MIN = 0.55;
+const ASK_INTER_ATTEMPT_BACKOFF_MS = 120;
+const ASK_ATTEMPT_RETRY_REMAIN_MS = 2_500;
+const ASK_MIN_NO_SPEECH_WINDOW_MS = 12_000;
+const ASK_NON_ECHO_VOICE_MIN_MS = 260;
+const ASK_STRICT_NON_ECHO_RATIO_MIN = 0.66;
+const ASK_STRICT_DOUBLE_TALK_MIN_MS = 120;
 const ECHO_ONLY_RMS_RATIO_MAX = 0.72;
 const ECHO_DOUBLE_TALK_RMS_FACTOR = 1.22;
+// macOS full-duplex AEC baseline: enable VoiceProcessingIO by default in ASK.
+// Can be disabled explicitly with ECHOCODING_ASK_VOICE_PROCESSING=0.
+const ASK_USE_VOICE_PROCESSING_IO = process.env.ECHOCODING_ASK_VOICE_PROCESSING !== '0';
+const ASK_TTS_VOICE_PROCESSING_VOLUME_BOOST = (() => {
+  const parsed = Number.parseFloat(process.env.ECHOCODING_ASK_TTS_VP_BOOST ?? '1.65');
+  if (!Number.isFinite(parsed)) return 1.65;
+  return Math.max(1.0, Math.min(2.2, parsed));
+})();
 const ASK_LOCK_DIR = path.join(os.tmpdir(), 'echocoding-ask.lock');
 const ASK_LOCK_OWNER_FILE = path.join(ASK_LOCK_DIR, 'owner.json');
 const ASK_LOCK_STALE_MS = 180_000;
@@ -86,6 +98,10 @@ interface VADRuntimeConfig {
 interface MicrophoneStream {
   stop: () => void;
   done: Promise<void>;
+}
+
+interface MicCaptureOptions {
+  enableVoiceProcessing?: boolean;
 }
 
 type CloudStreamFormat = 'pcm' | 'ogg';
@@ -319,7 +335,39 @@ function delayMs(ms: number): Promise<void> {
 }
 
 function normalizeEchoText(text: string): string {
-  return text
+  const digitMap: Record<string, string> = {
+    '零': '0',
+    '〇': '0',
+    '一': '1',
+    '壹': '1',
+    '二': '2',
+    '两': '2',
+    '贰': '2',
+    '三': '3',
+    '叁': '3',
+    '四': '4',
+    '肆': '4',
+    '五': '5',
+    '伍': '5',
+    '六': '6',
+    '陆': '6',
+    '七': '7',
+    '柒': '7',
+    '八': '8',
+    '捌': '8',
+    '九': '9',
+    '玖': '9',
+    '十': '10',
+  };
+  const normalizedDigits = text.replace(/[零〇一壹二两贰三叁四肆五伍六陆七柒八捌九玖十０-９]/gu, (ch) => {
+    if (digitMap[ch]) return digitMap[ch];
+    const cp = ch.codePointAt(0);
+    if (cp && cp >= 0xFF10 && cp <= 0xFF19) {
+      return String.fromCharCode(cp - 0xFF10 + 0x30);
+    }
+    return ch;
+  });
+  return normalizedDigits
     .trim()
     .toLowerCase()
     .replace(/[\s\p{P}\p{S}]+/gu, '');
@@ -342,6 +390,41 @@ function computeCharOverlap(a: string, b: string): number {
   return overlap;
 }
 
+function commonPrefixLength(a: string, b: string): number {
+  const max = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < max && a[i] === b[i]) i += 1;
+  return i;
+}
+
+function levenshteinDistance(a: string, b: string, maxDistance = Number.POSITIVE_INFINITY): number {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+
+  const prev = new Uint16Array(b.length + 1);
+  const curr = new Uint16Array(b.length + 1);
+  for (let j = 0; j <= b.length; j++) prev[j] = j;
+
+  for (let i = 1; i <= a.length; i++) {
+    curr[0] = i;
+    let rowMin = curr[0];
+    const ai = a.charCodeAt(i - 1);
+    for (let j = 1; j <= b.length; j++) {
+      const cost = ai === b.charCodeAt(j - 1) ? 0 : 1;
+      const del = prev[j] + 1;
+      const ins = curr[j - 1] + 1;
+      const sub = prev[j - 1] + cost;
+      const best = del < ins ? (del < sub ? del : sub) : (ins < sub ? ins : sub);
+      curr[j] = best;
+      if (best < rowMin) rowMin = best;
+    }
+    if (rowMin > maxDistance) return maxDistance + 1;
+    prev.set(curr);
+  }
+  return prev[b.length];
+}
+
 function isLikelyPromptEcho(recognizedText: string, promptText: string): boolean {
   if (!recognizedText || !promptText) return false;
   const recognized = normalizeEchoText(recognizedText);
@@ -351,6 +434,11 @@ function isLikelyPromptEcho(recognizedText: string, promptText: string): boolean
   if (minLen < 2) return false;
 
   if (recognized === prompt) return true;
+  // Prompt readback usually starts from the beginning; catch short prefix echoes early.
+  if (prompt.startsWith(recognized) && recognized.length >= 2) return true;
+  if (recognized.startsWith(prompt) && prompt.length >= 2) return true;
+  // For longer spans copied verbatim from prompt, treat as echo even if not full sentence.
+  if (recognized.length >= 6 && prompt.includes(recognized)) return true;
   if (prompt.includes(recognized) && recognized.length >= Math.max(2, Math.floor(prompt.length * 0.4))) {
     return true;
   }
@@ -359,10 +447,23 @@ function isLikelyPromptEcho(recognizedText: string, promptText: string): boolean
   }
 
   const overlap = computeCharOverlap(recognized, prompt);
+  const overlapMinRatio = overlap / minLen;
+  const prefixRatio = commonPrefixLength(recognized, prompt) / minLen;
+  if (minLen >= 6 && prefixRatio >= 0.5 && overlapMinRatio >= 0.78) {
+    return true;
+  }
   const recognizedRatio = overlap / recognized.length;
   const promptRatio = overlap / prompt.length;
   if (minLen <= 4) {
     return recognizedRatio >= 0.78 && promptRatio >= 0.78;
+  }
+  if (minLen >= 8) {
+    const maxLen = Math.max(recognized.length, prompt.length);
+    const distanceThreshold = Math.max(2, Math.floor(maxLen * 0.36));
+    const dist = levenshteinDistance(recognized, prompt, distanceThreshold);
+    if (dist <= distanceThreshold) {
+      return true;
+    }
   }
   return recognizedRatio >= 0.9 && promptRatio >= 0.5;
 }
@@ -388,6 +489,7 @@ function requiredNonEchoVoicedMs(strictWindow: boolean): number {
 function hasEnoughNonEchoEvidence(
   nonEchoVoicedMs: number,
   voicedMs: number,
+  doubleTalkMs: number,
   strictWindow: boolean,
 ): boolean {
   if (nonEchoVoicedMs < requiredNonEchoVoicedMs(strictWindow)) {
@@ -395,7 +497,8 @@ function hasEnoughNonEchoEvidence(
   }
   if (!strictWindow) return true;
   if (voicedMs <= 0) return false;
-  return (nonEchoVoicedMs / voicedMs) >= ASK_STRICT_NON_ECHO_RATIO_MIN;
+  if ((nonEchoVoicedMs / voicedMs) < ASK_STRICT_NON_ECHO_RATIO_MIN) return false;
+  return doubleTalkMs >= ASK_STRICT_DOUBLE_TALK_MIN_MS;
 }
 
 function isRecoverableAskError(err: unknown): boolean {
@@ -414,6 +517,26 @@ function isRecoverableAskError(err: unknown): boolean {
   }
 
   return (
+    msg.includes('timeout') ||
+    msg.includes('temporar') ||
+    msg.includes('websocket') ||
+    msg.includes('socket') ||
+    msg.includes('stream') ||
+    msg.includes('connection') ||
+    msg.includes('upstream') ||
+    msg.includes('network') ||
+    msg.includes('econn') ||
+    msg.includes('broken pipe')
+  );
+}
+
+function isTransientProxyStreamErrorMessage(message: string): boolean {
+  const msg = message.toLowerCase();
+  if (!msg) return false;
+  return (
+    msg.includes('waiting next packet') ||
+    msg.includes('allocate session') ||
+    msg.includes('pre-handle') ||
     msg.includes('timeout') ||
     msg.includes('temporar') ||
     msg.includes('websocket') ||
@@ -558,6 +681,10 @@ async function ensureSharedAskMic(): Promise<SharedAskMicSession> {
       for (const tap of [...session.taps]) {
         try { tap.onChunk(frame); } catch { /* ignore tap callback errors */ }
       }
+    }, {
+      // Default off: avoid output ducking/attenuation while HUD ASK is active.
+      // If needed, users can opt in with ECHOCODING_ASK_VOICE_PROCESSING=1.
+      enableVoiceProcessing: ASK_USE_VOICE_PROCESSING_IO,
     });
 
     const session: SharedAskMicSession = {
@@ -630,7 +757,9 @@ async function startAskAwareMicrophonePcmStream(
   askSession = false,
 ): Promise<MicrophoneStream> {
   if (!askSession) {
-    return startMicrophonePcmStream(timeoutSec, onChunk);
+    return startMicrophonePcmStream(timeoutSec, onChunk, {
+      enableVoiceProcessing: false,
+    });
   }
   return startAskSessionMicTap(onChunk);
 }
@@ -867,6 +996,7 @@ export async function ask(
       };
       const speakTask = speak(question, {
         force: true,
+        volumeBoost: ASK_USE_VOICE_PROCESSING_IO ? ASK_TTS_VOICE_PROCESSING_VOLUME_BOOST : undefined,
         onPlaybackStart: () => {
           extendTtsEchoGuard();
           if (promptShown) return;
@@ -913,9 +1043,9 @@ export async function ask(
               // Ask mode: if there is no clear response, keep channel open up to timeout.
               vadOverrides: {
                 // Favor responsiveness during interactive ask.
-                silenceMs: 800,
-                minSpeechMs: 350,
-                noSpeechTimeoutMs: remainingMs,
+                silenceMs: 700,
+                minSpeechMs: 240,
+                noSpeechTimeoutMs: Math.max(ASK_MIN_NO_SPEECH_WINDOW_MS, remainingMs),
                 maxDurationMs: remainingMs,
               },
             },
@@ -944,6 +1074,15 @@ export async function ask(
         recoverableErrorCount = 0;
         if (attemptResult === '[empty]') {
           attemptResult = '[timeout]';
+        }
+        if (attemptResult === '[timeout]') {
+          const remainingAfterTimeoutMs = askDeadlineAt - Date.now();
+          if (remainingAfterTimeoutMs > ASK_ATTEMPT_RETRY_REMAIN_MS) {
+            hud.updateStatus('Listening', true);
+            hud.updatePartial('');
+            await delayMs(ASK_INTER_ATTEMPT_BACKOFF_MS);
+            continue;
+          }
         }
         if (!prompt || !isLikelyPromptEcho(attemptResult, prompt)) {
           if (attemptResult === '[timeout]') hud.timeout();
@@ -1222,12 +1361,13 @@ async function recordMicrophone(timeoutSec: number): Promise<string | null> {
 async function startMicrophonePcmStream(
   timeoutSec: number,
   onChunk: (chunk: Buffer) => void,
+  options: MicCaptureOptions = {},
 ): Promise<MicrophoneStream> {
   const platform = os.platform();
 
   if (platform === 'darwin') {
     try {
-      const helperStream = await startMicHelperPcmStream(timeoutSec, onChunk);
+      const helperStream = await startMicHelperPcmStream(timeoutSec, onChunk, options);
       if (helperStream) return helperStream;
     } catch {
       // Fall back to sox pipe below.
@@ -1251,6 +1391,7 @@ async function startMicrophonePcmStream(
 async function startMicHelperPcmStream(
   timeoutSec: number,
   onChunk: (chunk: Buffer) => void,
+  options: MicCaptureOptions = {},
 ): Promise<MicrophoneStream | null> {
   const appPath = getMicHelperAppPath();
   if (!appPath) return null;
@@ -1319,7 +1460,14 @@ async function startMicHelperPcmStream(
     });
 
     server.listen(sockPath, () => {
-      child = spawn('open', ['-W', '-n', appPath, '--args', 'stream-record', sockPath, String(timeoutSec)], {
+      const helperArgs = ['-W', '-n', appPath, '--args', 'stream-record', sockPath, String(timeoutSec)];
+      if (options.enableVoiceProcessing === true) {
+        helperArgs.push('--voice-processing');
+      } else if (options.enableVoiceProcessing === false) {
+        helperArgs.push('--no-voice-processing');
+      }
+
+      child = spawn('open', helperArgs, {
         stdio: 'ignore',
       });
 
@@ -1636,11 +1784,13 @@ async function recordSpeechWithVad(
   let candidateVoicedMs = 0;
   let candidateLastVoiceAt = 0;
   let candidateNonEchoVoicedMs = 0;
+  let candidateDoubleTalkMs = 0;
   let candidateStrictWindow = false;
   let lastVoiceAt = 0;
   let speechStrictWindow = false;
   let speechVoicedMs = 0;
   let speechNonEchoVoicedMs = 0;
+  let speechDoubleTalkMs = 0;
 
   const preRollBuffers: Buffer[] = [];
   const candidateBuffers: Buffer[] = [];
@@ -1706,7 +1856,7 @@ async function recordSpeechWithVad(
       settleResolve(null);
       return;
     }
-    if (!hasEnoughNonEchoEvidence(speechNonEchoVoicedMs, speechVoicedMs, speechStrictWindow)) {
+    if (!hasEnoughNonEchoEvidence(speechNonEchoVoicedMs, speechVoicedMs, speechDoubleTalkMs, speechStrictWindow)) {
       settleResolve(null);
       return;
     }
@@ -1733,6 +1883,7 @@ async function recordSpeechWithVad(
       candidateVoicedMs = 0;
       candidateLastVoiceAt = 0;
       candidateNonEchoVoicedMs = 0;
+      candidateDoubleTalkMs = 0;
       candidateStrictWindow = false;
       preRollBuffers.length = 0;
       preRollBytes = 0;
@@ -1740,7 +1891,7 @@ async function recordSpeechWithVad(
       return;
     }
     const requireDoubleTalk = duringTtsRequireDoubleTalk?.() ?? false;
-    const voiced = frame.voiced && (!requireDoubleTalk || frame.voicedByDoubleTalk);
+    const voiced = frame.voiced;
     const chunkMs = pcmBytesToMs(filteredChunk.length);
 
     if (!speechCommitted) {
@@ -1751,6 +1902,7 @@ async function recordSpeechWithVad(
           candidateVoicedMs = chunkMs;
           candidateLastVoiceAt = now;
           candidateNonEchoVoicedMs = !frame.echoLikely ? chunkMs : 0;
+          candidateDoubleTalkMs = frame.voicedByDoubleTalk ? chunkMs : 0;
           candidateStrictWindow = requireDoubleTalk;
         } else {
           preRollBuffers.push(filteredChunk);
@@ -1771,13 +1923,15 @@ async function recordSpeechWithVad(
         candidateVoicedMs += chunkMs;
         candidateLastVoiceAt = now;
         if (!frame.echoLikely) candidateNonEchoVoicedMs += chunkMs;
+        if (frame.voicedByDoubleTalk) candidateDoubleTalkMs += chunkMs;
       }
 
-      if (candidateVoicedMs >= vadConfig.minSpeechMs && hasEnoughNonEchoEvidence(candidateNonEchoVoicedMs, candidateVoicedMs, candidateStrictWindow)) {
+      if (candidateVoicedMs >= vadConfig.minSpeechMs && hasEnoughNonEchoEvidence(candidateNonEchoVoicedMs, candidateVoicedMs, candidateDoubleTalkMs, candidateStrictWindow)) {
         speechCommitted = true;
         speechStrictWindow = candidateStrictWindow;
         speechVoicedMs = candidateVoicedMs;
         speechNonEchoVoicedMs = candidateNonEchoVoicedMs;
+        speechDoubleTalkMs = candidateDoubleTalkMs;
         hud.updateStatus('Recognizing', true);
         lastVoiceAt = candidateLastVoiceAt || now;
         for (const pending of candidateBuffers) appendSpeechChunk(pending);
@@ -1795,6 +1949,7 @@ async function recordSpeechWithVad(
         candidateVoicedMs = 0;
         candidateLastVoiceAt = 0;
         candidateNonEchoVoicedMs = 0;
+        candidateDoubleTalkMs = 0;
         candidateStrictWindow = false;
         preRollBuffers.length = 0;
         preRollBytes = 0;
@@ -1810,6 +1965,7 @@ async function recordSpeechWithVad(
       lastVoiceAt = now;
       speechVoicedMs += chunkMs;
       if (!frame.echoLikely) speechNonEchoVoicedMs += chunkMs;
+      if (frame.voicedByDoubleTalk) speechDoubleTalkMs += chunkMs;
     }
     else if (now - lastVoiceAt >= vadConfig.silenceMs) {
       hud.updateStatus('Speech ended', true);
@@ -2023,11 +2179,13 @@ async function listenCloudProxyStream(
   let candidateVoicedMs = 0;
   let candidateLastVoiceAt = 0;
   let candidateNonEchoVoicedMs = 0;
+  let candidateDoubleTalkMs = 0;
   let candidateStrictWindow = false;
   let lastVoiceAt = 0;
   let speechStrictWindow = false;
   let speechVoicedMs = 0;
   let speechNonEchoVoicedMs = 0;
+  let speechDoubleTalkMs = 0;
   const ws = await openProxyAsrStream(endpoint);
   const resultPromise = createProxyStreamResultPromise(ws, (event) => {
     if (event.type === 'partial' && event.text) {
@@ -2045,7 +2203,12 @@ async function listenCloudProxyStream(
       hud.updateStatus('Finalizing', true);
     }
     if (event.type === 'error') {
-      hud.error(event.error || 'ASR stream failed');
+      const errorText = event.error || 'ASR stream failed';
+      if (isTransientProxyStreamErrorMessage(errorText)) {
+        hud.updateStatus('Reconnecting', true);
+      } else {
+        hud.error(errorText);
+      }
     }
   });
 
@@ -2112,7 +2275,7 @@ async function listenCloudProxyStream(
 
   const finishSpeech = (reason: string) => {
     if (finished) return;
-    if (!hasEnoughNonEchoEvidence(speechNonEchoVoicedMs, speechVoicedMs, speechStrictWindow)) {
+    if (!hasEnoughNonEchoEvidence(speechNonEchoVoicedMs, speechVoicedMs, speechDoubleTalkMs, speechStrictWindow)) {
       finishTimeout();
       return;
     }
@@ -2166,12 +2329,27 @@ async function listenCloudProxyStream(
     return audioSender.sendPcm(chunk);
   };
 
+  const silenceChunkCache = new Map<number, Buffer>();
+  const sendKeepAliveSilence = (size: number): boolean => {
+    let silence = silenceChunkCache.get(size);
+    if (!silence) {
+      silence = Buffer.alloc(size);
+      silenceChunkCache.set(size, silence);
+    }
+    return sendSpeechChunk(silence);
+  };
+
   mic = await startAskAwareMicrophonePcmStream(maxSourceSec, (chunk) => {
     if (finished) return;
 
     const now = Date.now();
     const frame = applyEchoVadFrame(chunk, vadConfig.rmsThreshold, now, noiseState);
     const filteredChunk = frame.filteredChunk;
+    if (!speechCommitted) {
+      // Keep upstream ASR session alive while local VAD is still waiting for commit.
+      // This avoids "waiting next packet timeout" during multi-turn ASK gaps.
+      if (!sendKeepAliveSilence(filteredChunk.length)) return;
+    }
     if (!gateActivated) {
       if (gateEligibleAt === null || now < gateEligibleAt) return;
       const gateRms = frame.filteredRms;
@@ -2186,6 +2364,7 @@ async function listenCloudProxyStream(
       candidateVoicedMs = 0;
       candidateLastVoiceAt = 0;
       candidateNonEchoVoicedMs = 0;
+      candidateDoubleTalkMs = 0;
       candidateStrictWindow = false;
       preRollBuffers.length = 0;
       preRollBytes = 0;
@@ -2193,7 +2372,7 @@ async function listenCloudProxyStream(
       return;
     }
     const requireDoubleTalk = duringTtsRequireDoubleTalk?.() ?? false;
-    const voiced = frame.voiced && (!requireDoubleTalk || frame.voicedByDoubleTalk);
+    const voiced = frame.voiced;
     const chunkMs = pcmBytesToMs(filteredChunk.length);
 
     if (!speechCommitted) {
@@ -2204,6 +2383,7 @@ async function listenCloudProxyStream(
           candidateVoicedMs = chunkMs;
           candidateLastVoiceAt = now;
           candidateNonEchoVoicedMs = !frame.echoLikely ? chunkMs : 0;
+          candidateDoubleTalkMs = frame.voicedByDoubleTalk ? chunkMs : 0;
           candidateStrictWindow = requireDoubleTalk;
         } else {
           preRollBuffers.push(filteredChunk);
@@ -2224,13 +2404,15 @@ async function listenCloudProxyStream(
         candidateVoicedMs += chunkMs;
         candidateLastVoiceAt = now;
         if (!frame.echoLikely) candidateNonEchoVoicedMs += chunkMs;
+        if (frame.voicedByDoubleTalk) candidateDoubleTalkMs += chunkMs;
       }
 
-      if (candidateVoicedMs >= vadConfig.minSpeechMs && hasEnoughNonEchoEvidence(candidateNonEchoVoicedMs, candidateVoicedMs, candidateStrictWindow)) {
+      if (candidateVoicedMs >= vadConfig.minSpeechMs && hasEnoughNonEchoEvidence(candidateNonEchoVoicedMs, candidateVoicedMs, candidateDoubleTalkMs, candidateStrictWindow)) {
         speechCommitted = true;
         speechStrictWindow = candidateStrictWindow;
         speechVoicedMs = candidateVoicedMs;
         speechNonEchoVoicedMs = candidateNonEchoVoicedMs;
+        speechDoubleTalkMs = candidateDoubleTalkMs;
         hud.updateStatus('Recognizing', true);
         lastVoiceAt = candidateLastVoiceAt || now;
         for (const pending of candidateBuffers) {
@@ -2250,6 +2432,7 @@ async function listenCloudProxyStream(
         candidateVoicedMs = 0;
         candidateLastVoiceAt = 0;
         candidateNonEchoVoicedMs = 0;
+        candidateDoubleTalkMs = 0;
         candidateStrictWindow = false;
         preRollBuffers.length = 0;
         preRollBytes = 0;
@@ -2265,6 +2448,7 @@ async function listenCloudProxyStream(
       lastVoiceAt = now;
       speechVoicedMs += chunkMs;
       if (!frame.echoLikely) speechNonEchoVoicedMs += chunkMs;
+      if (frame.voicedByDoubleTalk) speechDoubleTalkMs += chunkMs;
     }
     else if (now - lastVoiceAt >= vadConfig.silenceMs) {
       hud.updateStatus('Speech ended', true);

@@ -107,6 +107,54 @@ func shouldEnableVoiceProcessing() -> Bool {
     return envBool("ECHOCODING_MIC_VOICE_PROCESSING", defaultValue: false)
 }
 
+@available(macOS 14.0, *)
+func resolveVoiceProcessingDuckingLevel() -> AVAudioVoiceProcessingOtherAudioDuckingConfiguration.Level {
+    let raw = ProcessInfo.processInfo.environment["ECHOCODING_MIC_VP_DUCKING_LEVEL"]?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased() ?? "min"
+
+    let levelRawValue: Int
+    switch raw {
+    case "default":
+        levelRawValue = 0
+    case "mid":
+        levelRawValue = 20
+    case "max":
+        levelRawValue = 30
+    default:
+        levelRawValue = 10
+    }
+
+    return AVAudioVoiceProcessingOtherAudioDuckingConfiguration.Level(rawValue: levelRawValue)
+        ?? AVAudioVoiceProcessingOtherAudioDuckingConfiguration.Level(rawValue: 10)!
+}
+
+func configureVoiceProcessing(_ input: AVAudioInputNode, enabled: Bool, context: String) {
+    guard #available(macOS 10.15, *), enabled else {
+        debugLog("\(context): voice processing disabled")
+        return
+    }
+
+    do {
+        try input.setVoiceProcessingEnabled(true)
+        debugLog("\(context): voice processing enabled")
+
+        // AGC can make perceived loudness unstable in noisy environments.
+        input.isVoiceProcessingAGCEnabled = !envBool("ECHOCODING_MIC_VP_DISABLE_AGC", defaultValue: true)
+        debugLog("\(context): voice processing AGC=\(input.isVoiceProcessingAGCEnabled)")
+
+        if #available(macOS 14.0, *) {
+            var config = input.voiceProcessingOtherAudioDuckingConfiguration
+            config.enableAdvancedDucking = false
+            config.duckingLevel = resolveVoiceProcessingDuckingLevel()
+            input.voiceProcessingOtherAudioDuckingConfiguration = config
+            debugLog("\(context): ducking advanced=\(config.enableAdvancedDucking) levelRaw=\(config.duckingLevel.rawValue)")
+        }
+    } catch {
+        debugLog("\(context): voice processing unavailable \(error)")
+    }
+}
+
 // MARK: - WAV Recording
 
 class Recorder: NSObject {
@@ -120,16 +168,7 @@ class Recorder: NSObject {
 
         let input = engine.inputNode
         let hwFormat = input.outputFormat(forBus: 0)
-        if #available(macOS 10.15, *), shouldEnableVoiceProcessing() {
-            do {
-                try input.setVoiceProcessingEnabled(true)
-                debugLog("record: voice processing enabled")
-            } catch {
-                debugLog("record: voice processing unavailable \(error)")
-            }
-        } else {
-            debugLog("record: voice processing disabled")
-        }
+        configureVoiceProcessing(input, enabled: shouldEnableVoiceProcessing(), context: "record")
 
         // Target: 16kHz, mono, 16-bit signed int
         guard let targetFormat = AVAudioFormat(
@@ -261,7 +300,7 @@ class StreamRecorder: NSObject {
     private var timer: DispatchSourceTimer?
     private var socketFd: Int32 = -1
 
-    func stream(seconds: Double, socketPath: String) -> Bool {
+    func stream(seconds: Double, socketPath: String, forceVoiceProcessing: Bool?) -> Bool {
         let fd = connectUnixSocket(socketPath)
         if fd < 0 {
             fputs("Error: cannot connect socket \(socketPath)\n", stderr)
@@ -274,16 +313,8 @@ class StreamRecorder: NSObject {
 
         let input = engine.inputNode
         let hwFormat = input.outputFormat(forBus: 0)
-        if #available(macOS 10.15, *), shouldEnableVoiceProcessing() {
-            do {
-                try input.setVoiceProcessingEnabled(true)
-                debugLog("stream-record: voice processing enabled")
-            } catch {
-                debugLog("stream-record: voice processing unavailable \(error)")
-            }
-        } else {
-            debugLog("stream-record: voice processing disabled")
-        }
+        let voiceProcessingEnabled = forceVoiceProcessing ?? shouldEnableVoiceProcessing()
+        configureVoiceProcessing(input, enabled: voiceProcessingEnabled, context: "stream-record")
 
         guard let targetFormat = AVAudioFormat(
             commonFormat: .pcmFormatInt16,
@@ -1024,12 +1055,29 @@ case "stream-record":
     let argList = Array(args)
     debugLog("stream-record: args=\(argList)")
     guard argList.count >= 2 else {
-        fputs("Usage: mic-helper stream-record <socket-path> [seconds]\n", stderr)
+        fputs("Usage: mic-helper stream-record <socket-path> [seconds] [--voice-processing|--no-voice-processing]\n", stderr)
         exit(2)
     }
     let socketPath = argList[1]
-    let seconds = (argList.count >= 3 ? Double(argList[2]) : nil) ?? 90
-    debugLog("stream-record: socket=\(socketPath) seconds=\(seconds)")
+    var seconds: Double = 90
+    var forceVoiceProcessing: Bool? = nil
+    if argList.count >= 3 {
+        for token in argList.dropFirst(2) {
+            if token == "--voice-processing" {
+                forceVoiceProcessing = true
+                continue
+            }
+            if token == "--no-voice-processing" {
+                forceVoiceProcessing = false
+                continue
+            }
+            if let parsed = Double(token) {
+                seconds = parsed
+                continue
+            }
+        }
+    }
+    debugLog("stream-record: socket=\(socketPath) seconds=\(seconds) forceVoiceProcessing=\(String(describing: forceVoiceProcessing))")
 
     if !checkPermission() {
         debugLog("stream-record: permission not granted")
@@ -1039,7 +1087,7 @@ case "stream-record":
     debugLog("stream-record: permission already granted")
 
     let recorder = StreamRecorder()
-    let ok = recorder.stream(seconds: seconds, socketPath: socketPath)
+    let ok = recorder.stream(seconds: seconds, socketPath: socketPath, forceVoiceProcessing: forceVoiceProcessing)
     debugLog("stream-record: finished ok=\(ok)")
     exit(ok ? 0 : 1)
 
