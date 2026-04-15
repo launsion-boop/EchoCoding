@@ -138,7 +138,7 @@ function createDefaultConfig(env: NodeJS.ProcessEnv = process.env): EchoConfig {
   return {
     enabled: true,
     theme: 'default',
-    volume: 70,
+    volume: 100,
     mode: 'full',
     voiceLevel: 'balanced',
     autoVoiceMode: true,
@@ -197,7 +197,7 @@ function createDefaultConfig(env: NodeJS.ProcessEnv = process.env): EchoConfig {
     },
     sfx: {
       enabled: true,
-      volume: 80,
+      volume: 100,
     },
     daemon: {
       socketPath: '/tmp/echocoding.sock',

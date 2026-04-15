@@ -737,24 +737,24 @@
     // General settings (always visible)
     document.getElementById('settingsGeneral').innerHTML = `
       <div class="setting-item">
-        <label>Master Volume</label>
+        <label>Master Volume / 主音量</label>
         <div class="slider-row">
-          <input type="range" min="0" max="100" value="${config.volume || 70}" oninput="updateSetting('volume', this.value); this.nextElementSibling.textContent = this.value">
-          <span class="slider-val">${config.volume || 70}</span>
+          <input type="range" min="0" max="100" value="${config.volume || 100}" oninput="this.nextElementSibling.textContent = this.value; debouncedSetting('volume', this.value)">
+          <span class="slider-val">${config.volume || 100}</span>
         </div>
       </div>
       <div class="setting-item">
-        <label>Voice Broadcast Volume</label>
+        <label>Voice Broadcast Volume / 语音播报音量</label>
         <div class="slider-row">
-          <input type="range" min="0" max="100" value="${config.tts?.volume ?? 100}" oninput="updateSetting('tts.volume', this.value); this.nextElementSibling.textContent = this.value">
-          <span class="slider-val">${config.tts?.volume ?? 100}</span>
+          <input type="range" min="0" max="100" value="${config.tts?.volume ?? 50}" oninput="this.nextElementSibling.textContent = this.value; debouncedSetting('tts.volume', this.value)">
+          <span class="slider-val">${config.tts?.volume ?? 50}</span>
         </div>
       </div>
       <div class="setting-item">
-        <label>Prompt Tone Volume</label>
+        <label>Prompt Tone Volume / 提示音量</label>
         <div class="slider-row">
-          <input type="range" min="0" max="100" value="${config.sfx?.volume ?? 80}" oninput="updateSetting('sfx.volume', this.value); this.nextElementSibling.textContent = this.value">
-          <span class="slider-val">${config.sfx?.volume ?? 80}</span>
+          <input type="range" min="0" max="100" value="${config.sfx?.volume ?? 100}" oninput="this.nextElementSibling.textContent = this.value; debouncedSetting('sfx.volume', this.value)">
+          <span class="slider-val">${config.sfx?.volume ?? 100}</span>
         </div>
       </div>
       <div class="setting-item">
@@ -809,7 +809,7 @@
           <div class="setting-item">
             <label>Speed</label>
             <div class="slider-row">
-              <input type="range" min="50" max="200" value="${(config.tts?.speed || 1.0) * 100}" oninput="updateSetting('tts.speed', this.value / 100); this.nextElementSibling.textContent = (this.value / 100).toFixed(1)">
+              <input type="range" min="50" max="200" value="${(config.tts?.speed || 1.0) * 100}" oninput="this.nextElementSibling.textContent = (this.value / 100).toFixed(1); debouncedSetting('tts.speed', this.value / 100)">
               <span class="slider-val">${(config.tts?.speed || 1.0).toFixed(1)}</span>
             </div>
           </div>
@@ -851,7 +851,7 @@
           <div class="setting-item">
             <label>Speed</label>
             <div class="slider-row">
-              <input type="range" min="50" max="200" value="${(config.tts?.speed || 1.0) * 100}" oninput="updateSetting('tts.speed', this.value / 100); this.nextElementSibling.textContent = (this.value / 100).toFixed(1)">
+              <input type="range" min="50" max="200" value="${(config.tts?.speed || 1.0) * 100}" oninput="this.nextElementSibling.textContent = (this.value / 100).toFixed(1); debouncedSetting('tts.speed', this.value / 100)">
               <span class="slider-val">${(config.tts?.speed || 1.0).toFixed(1)}</span>
             </div>
           </div>
@@ -866,6 +866,12 @@
         </div>
       `;
     }
+  }
+
+  const _debounceTimers = {};
+  function debouncedSetting(key, value, delayMs = 300) {
+    clearTimeout(_debounceTimers[key]);
+    _debounceTimers[key] = setTimeout(() => updateSetting(key, value), delayMs);
   }
 
   async function updateSetting(key, value) {
