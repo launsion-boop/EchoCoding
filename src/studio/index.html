@@ -275,6 +275,69 @@
   }
   .toggle.on::after { transform: translateX(18px); background: var(--accent); }
 
+  /* Mode panel */
+  .mode-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px 24px;
+    margin-bottom: 32px;
+  }
+  .mode-panel-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 4px;
+  }
+  .mode-panel-title { font-size: 15px; font-weight: 600; }
+  .global-tag {
+    font-size: 11px;
+    padding: 2px 8px;
+    background: rgba(88,166,255,0.12);
+    color: var(--accent);
+    border-radius: 12px;
+    font-weight: 500;
+  }
+  .mode-hint { font-size: 12px; color: var(--text-dim); margin-bottom: 16px; }
+  .mode-cards {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+  @media (max-width: 600px) { .mode-cards { grid-template-columns: 1fr; } }
+  .mode-card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    cursor: pointer;
+    transition: all 0.15s;
+    user-select: none;
+  }
+  .mode-card:hover { border-color: var(--accent); }
+  .mode-card.active {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
+    background: rgba(31,111,235,0.08);
+  }
+  .mode-card-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+  }
+  .mode-card .mode-name { font-size: 15px; font-weight: 600; }
+  .mode-card .mode-desc { font-size: 12px; color: var(--text-dim); line-height: 1.4; }
+  .mode-off-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+  }
+  .mode-off-label { font-size: 14px; color: var(--text-dim); }
+
   /* Loading overlay */
   .loading {
     position: fixed;
@@ -307,6 +370,20 @@
 </div>
 
 <div class="container">
+  <!-- Mode Panel -->
+  <div class="mode-panel">
+    <div class="mode-panel-header">
+      <span class="mode-panel-title">语音模式</span>
+      <span class="global-tag">全局</span>
+    </div>
+    <div class="mode-hint">所有 session 生效 · 可随时用 /echocoding 切换</div>
+    <div class="mode-cards" id="modeCards"></div>
+    <div class="mode-off-row">
+      <span class="mode-off-label">关闭 EchoCoding</span>
+      <div class="toggle" id="echoOffToggle" onclick="toggleEchoEnabled()"></div>
+    </div>
+  </div>
+
   <!-- Voice Browser -->
   <div class="section">
     <div class="section-title">Voice Browser <span class="badge" id="voiceCount"></span></div>
@@ -496,6 +573,7 @@
 
     document.getElementById('voiceCount').textContent = `${speakers.length} voices`;
 
+    renderModeSection();
     renderSpeakers();
     renderSFX();
     renderSettings();
@@ -680,22 +758,6 @@
         </div>
       </div>
       <div class="setting-item">
-        <label>Audio Mode</label>
-        <select onchange="updateSetting('mode', this.value)">
-          ${['full', 'sfx-only', 'voice-only', 'focus', 'mute'].map(m =>
-            `<option value="${m}" ${config.mode === m ? 'selected' : ''}>${m}</option>`
-          ).join('')}
-        </select>
-      </div>
-      <div class="setting-item">
-        <label>Voice Level</label>
-        <select onchange="updateSetting('voiceLevel', this.value)">
-          <option value="minimal" ${voiceLevel === 'minimal' ? 'selected' : ''}>Minimal (only critical moments)</option>
-          <option value="balanced" ${voiceLevel === 'balanced' ? 'selected' : ''}>Balanced (most turns)</option>
-          <option value="verbose" ${voiceLevel === 'verbose' ? 'selected' : ''}>Verbose (every action)</option>
-        </select>
-      </div>
-      <div class="setting-item">
         <label>ASR Noise Profile</label>
         <select onchange="updateSetting('asr.noiseControl.profile', this.value)">
           <option value="normal" ${noiseProfile === 'normal' ? 'selected' : ''}>Normal</option>
@@ -823,6 +885,63 @@
     const isOn = el.classList.contains('on');
     el.classList.toggle('on');
     await updateSetting(key, !isOn);
+  }
+
+  // --- Mode Panel ---
+  const VOICE_MODES = [
+    { id: 'minimal',  label: '简约',   desc: '仅关键操作提示，SFX 常驻' },
+    { id: 'balanced', label: '平衡',   desc: '关键操作播报，支持语音问答' },
+    { id: 'verbose',  label: '强语音', desc: '每步操作全量播报' },
+  ];
+
+  function renderModeSection() {
+    const enabled = config.enabled !== false;
+    const level = config.voiceLevel || 'balanced';
+    document.getElementById('modeCards').innerHTML = VOICE_MODES.map(m => `
+      <div class="mode-card ${enabled && level === m.id ? 'active' : ''}" onclick="setVoiceMode('${m.id}')">
+        <div class="mode-card-top">
+          <span class="mode-name">${m.label}</span>
+          <div class="toggle ${enabled && level === m.id ? 'on' : ''}"></div>
+        </div>
+        <div class="mode-desc">${m.desc}</div>
+      </div>
+    `).join('');
+    const offToggle = document.getElementById('echoOffToggle');
+    if (offToggle) offToggle.className = 'toggle' + (!enabled ? ' on' : '');
+  }
+
+  async function setVoiceMode(level) {
+    setLoading(true);
+    for (const [key, value] of [
+      ['voiceLevel', level],
+      ['mode', 'full'],
+      ['enabled', true],
+      ['autoVoiceMode', true],
+    ]) {
+      await api('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, value }),
+      });
+    }
+    config = await api('/api/config');
+    renderModeSection();
+    renderSettings();
+    setLoading(false);
+  }
+
+  async function toggleEchoEnabled() {
+    const nowEnabled = config.enabled !== false;
+    setLoading(true);
+    await api('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: 'enabled', value: !nowEnabled }),
+    });
+    config = await api('/api/config');
+    renderModeSection();
+    renderSettings();
+    setLoading(false);
   }
 
   // --- Cloud Voice Support ---

@@ -141,7 +141,7 @@ function createDefaultConfig(env: NodeJS.ProcessEnv = process.env): EchoConfig {
     volume: 70,
     mode: 'full',
     voiceLevel: 'balanced',
-    autoVoiceMode: false,
+    autoVoiceMode: true,
     tts: {
       enabled: true,
       provider: 'cloud',
