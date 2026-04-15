@@ -64,5 +64,16 @@ exec "$DIR/MicHelper.app/Contents/MacOS/mic-helper" "$@"
 WRAPPER
 chmod +x "$ROOT_DIR/tools/mic-helper"
 
+# Sign bundle so macOS can persist TCC permission by bundle identifier.
+# Prefer explicit identity when provided; otherwise use ad-hoc signing.
+SIGN_IDENTITY="${ECHOCODING_SIGN_IDENTITY:--}"
+if command -v codesign >/dev/null 2>&1; then
+  if codesign --force --deep --sign "$SIGN_IDENTITY" "$APP_DIR"; then
+    echo "Signed: $APP_DIR (identity: $SIGN_IDENTITY)"
+  else
+    echo "Warning: codesign failed for $APP_DIR" >&2
+  fi
+fi
+
 echo "Built: $APP_DIR"
 echo "Wrapper: $ROOT_DIR/tools/mic-helper"

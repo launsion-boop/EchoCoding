@@ -161,7 +161,7 @@ function handleMessage(msg: DaemonMessage, conn?: net.Socket): void {
     case 'ask': {
       // TTS question + open mic + ASR → send result back
       if (msg.text) {
-        ask(msg.text)
+        ask(msg.text, 60)
           .then((result) => {
             // Write result back to stdout-connected client
             try { conn?.write(JSON.stringify({ result }) + '\n'); } catch { /* */ }

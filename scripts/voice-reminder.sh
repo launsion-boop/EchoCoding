@@ -10,8 +10,8 @@ HOOK_BIN="$SCRIPT_DIR/../dist/bin/echocoding-hook.js"
 NODE_BIN="${ECHOCODING_NODE:-$(command -v node 2>/dev/null || true)}"
 
 forward_user_prompt_submit_hook() {
-  # Best-effort: if Codex executes only the first UserPromptSubmit group,
-  # still forward the submit event so thinking ambient can start.
+  # Compatibility fallback for old runners that execute only the first
+  # UserPromptSubmit hook command.
   [ -n "$NODE_BIN" ] || return 0
   [ -f "$HOOK_BIN" ] || return 0
   (
@@ -20,7 +20,11 @@ forward_user_prompt_submit_hook() {
   ) &
 }
 
-forward_user_prompt_submit_hook
+# Default OFF to avoid duplicate UserPromptSubmit events in modern Codex,
+# which would otherwise cause repeated "thinking" cues.
+if [ "${ECHOCODING_FORWARD_SUBMIT:-0}" = "1" ]; then
+  forward_user_prompt_submit_hook
+fi
 
 # Bail silently if config missing
 [ -f "$CONFIG" ] || exit 0

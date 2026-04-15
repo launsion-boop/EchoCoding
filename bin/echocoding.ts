@@ -267,19 +267,20 @@ program
 // --- ask ---
 program
   .command('ask <question>')
-  .description('Speak a question via TTS, then listen for voice answer (stdout: recognized text)')
+  .description('Speak a question via TTS, then listen for voice answer (ASK mode timeout: 60s)')
   .action(async (question: string) => {
-    // TTS via daemon (blocking — wait for playback to finish), then record + ASR in foreground
+    // Prefer daemon path so multi-turn ASK can reuse one HUD session.
     try {
-      await sendWithResponse({ type: 'say', text: question }, 15_000);
+      const result = await sendAsk(question);
+      process.stdout.write(result + '\n');
+      return;
     } catch {
-      console.error('[echocoding] Daemon not running. Run `echocoding start` first.');
-      process.exit(1);
+      // Fallback: foreground ASK if daemon is unavailable.
     }
-    await new Promise((r) => setTimeout(r, 500)); // gap after TTS before opening mic
+
     try {
-      const { listen } = await import('../src/engines/asr-engine.js');
-      const result = await listen();
+      const { ask } = await import('../src/engines/asr-engine.js');
+      const result = await ask(question, 60);
       process.stdout.write(result + '\n');
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

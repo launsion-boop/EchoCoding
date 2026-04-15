@@ -71,6 +71,14 @@ export interface EchoConfig {
       apiKey: string;
       appId: string;         // Volcengine App ID
     };
+    vad: {
+      rmsThreshold: number;
+      silenceMs: number;
+      preRollMs: number;
+      minSpeechMs: number;
+      noSpeechTimeoutMs: number;
+      maxDurationMs: number;
+    };
     timeout: number;
   };
   sfx: {
@@ -165,6 +173,14 @@ function createDefaultConfig(env: NodeJS.ProcessEnv = process.env): EchoConfig {
         endpoint: 'https://coding.echoclaw.me/v1/asr',
         apiKey: '',
         appId: '',
+      },
+      vad: {
+        rmsThreshold: 0.01,
+        silenceMs: 1500,
+        preRollMs: 300,
+        minSpeechMs: 500,
+        noSpeechTimeoutMs: 15000,
+        maxDurationMs: 90000,
       },
       timeout: 90,
     },

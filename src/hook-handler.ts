@@ -46,11 +46,10 @@ export function handleHookEvent(event: HookEvent): void {
   const { hook_event_name } = event;
 
   // Ambient loop management:
-  // - UserPromptSubmit → thinking ambient (continuous while AI thinks)
-  // - PreToolUse → heartbeat ambient (alive indicator during tool execution)
-  //   Exception: Edit → typing ambient
-  // - PostToolUse / Stop → stop ambient
-  // - Next PreToolUse switches ambient automatically
+  // - UserPromptSubmit → thinking ambient
+  // - PreToolUse → semantic SFX + ambient (typing for edits, heartbeat otherwise)
+  // - PostToolUse → keep typing ambient after successful writes, else heartbeat
+  // - Stop → stop all ambient
 
   switch (hook_event_name) {
     case 'SessionStart':
@@ -72,9 +71,11 @@ export function handleHookEvent(event: HookEvent): void {
 
     case 'PostToolUse':
       _stopAmbient?.();
-      handlePostToolUse(event);
-      // After tool completes, start heartbeat — AI is still working (computing next step)
-      _startAmbient?.('heartbeat', AMBIENT_INTERVALS.heartbeat);
+      {
+        const toolKind = detectToolUseKind(event);
+        handlePostToolUse(event, toolKind);
+        startPostToolAmbient(event, toolKind);
+      }
       break;
 
     case 'Notification':
@@ -109,39 +110,35 @@ export function handleHookEvent(event: HookEvent): void {
 }
 
 function handlePreToolUse(event: HookEvent): void {
-  const { tool_name } = event;
-  const toolName = (tool_name ?? '').toLowerCase();
-  const shellCommand = getShellCommand(event);
-
-  if (isToolMatch(toolName, ['edit', 'apply_patch', 'write'])) {
-    // Edit/write: keyboard ambience should be clearly audible.
+  const toolKind = detectToolUseKind(event);
+  if (toolKind === 'typing') {
+    // Write + typing are intentionally paired:
+    // write = start marker, typing = ongoing ambient while editing.
     playSfx('write');
     _startAmbient?.('typing', AMBIENT_INTERVALS.typing);
-  } else if (isToolMatch(toolName, ['parallel'])) {
-    handleParallelPreToolUse(event);
-  } else if (isToolMatch(toolName, ['read', 'open', 'find', 'view_image', 'screenshot'])) {
+    return;
+  }
+  if (toolKind === 'read') {
     playSfx('read');
     _startAmbient?.('heartbeat', AMBIENT_INTERVALS.heartbeat);
-  } else if (isToolMatch(toolName, ['glob', 'grep', 'search_query', 'image_query', 'fuzzy_file_search'])) {
+    return;
+  }
+  if (toolKind === 'search') {
     playSfx('search');
     _startAmbient?.('heartbeat', AMBIENT_INTERVALS.heartbeat);
-  } else if (isToolMatch(toolName, ['bash', 'exec_command'])) {
-    // Shell: infer intent so "browsing" commands can use read/search SFX.
-    const shellPreSfx = detectPreShellSfx(shellCommand);
-    if (shellPreSfx === 'typing') {
-      playSfx('write');
-      _startAmbient?.('typing', AMBIENT_INTERVALS.typing);
-    } else {
-      playSfx(shellPreSfx);
-      _startAmbient?.('heartbeat', AMBIENT_INTERVALS.heartbeat);
-    }
-  } else {
-    playSfx('working');
-    _startAmbient?.('heartbeat', AMBIENT_INTERVALS.heartbeat);
+    return;
   }
+  if (toolKind === 'notification') {
+    playSfx('notification');
+    _startAmbient?.('heartbeat', AMBIENT_INTERVALS.heartbeat);
+    return;
+  }
+
+  playSfx('working');
+  _startAmbient?.('heartbeat', AMBIENT_INTERVALS.heartbeat);
 }
 
-function handlePostToolUse(event: HookEvent): void {
+function handlePostToolUse(event: HookEvent, toolKind: ToolUseKind): void {
   const { tool_name, exit_code, error, tool_response } = event;
 
   // Detect bash command semantics
@@ -152,24 +149,32 @@ function handlePostToolUse(event: HookEvent): void {
       playSfx(bashSfx);
       return;
     }
+  }
 
-    // For read/search/edit shell commands, skip generic success chime.
-    // Ambient heartbeat/typing already communicates progress and avoids audio clutter.
-    const success = exit_code === undefined || exit_code === 0;
-    if (success) {
-      const preKind = detectPreShellSfx(command);
-      if (preKind === 'read' || preKind === 'search' || preKind === 'typing') {
-        return;
-      }
-    }
+  const success = !error && (exit_code === undefined || exit_code === 0);
+
+  // For read/search/edit flows, skip generic success chime to reduce noise.
+  if (success && (toolKind === 'read' || toolKind === 'search' || toolKind === 'typing')) {
+    return;
   }
 
   // Generic success/error
-  if (error || (exit_code !== undefined && exit_code !== 0)) {
+  if (!success) {
     playSfx('error');
   } else {
     playSfx('success');
   }
+}
+
+function startPostToolAmbient(event: HookEvent, toolKind: ToolUseKind): void {
+  const success = !event.error && (event.exit_code === undefined || event.exit_code === 0);
+  if (success && toolKind === 'typing') {
+    // Keep typing ambience between consecutive write commands.
+    _startAmbient?.('typing', AMBIENT_INTERVALS.typing);
+    return;
+  }
+  // Default: heartbeat while model is still planning next action.
+  _startAmbient?.('heartbeat', AMBIENT_INTERVALS.heartbeat);
 }
 
 function handleStop(event: HookEvent): void {
@@ -262,11 +267,24 @@ function getShellCommand(event: HookEvent): string {
   return '';
 }
 
-type PreShellSfx = 'typing' | 'read' | 'search' | 'notification';
+type ToolUseKind = 'typing' | 'read' | 'search' | 'notification' | 'working';
+
+function detectToolUseKind(event: HookEvent): ToolUseKind {
+  const toolName = (event.tool_name ?? '').toLowerCase();
+  if (isToolMatch(toolName, ['edit', 'apply_patch', 'write'])) return 'typing';
+  if (isToolMatch(toolName, ['read', 'open', 'find', 'view_image', 'screenshot', 'read_thread_terminal'])) return 'read';
+  if (isToolMatch(toolName, ['glob', 'grep', 'search_query', 'image_query', 'fuzzy_file_search'])) return 'search';
+  if (isToolMatch(toolName, ['parallel'])) return detectParallelToolKind(event);
+  if (isToolMatch(toolName, ['bash', 'exec_command'])) return detectPreShellSfx(getShellCommand(event));
+  if (isToolMatch(toolName, ['sports', 'finance', 'weather', 'time'])) return 'notification';
+  return 'working';
+}
+
+type PreShellSfx = 'typing' | 'read' | 'search' | 'working';
 
 function detectPreShellSfx(command: string): PreShellSfx {
   const cmd = command.trim().toLowerCase();
-  if (!cmd) return 'notification';
+  if (!cmd) return 'working';
 
   // Edit-like shell commands.
   if (
@@ -275,12 +293,30 @@ function detectPreShellSfx(command: string): PreShellSfx {
     cmd.startsWith('patch ') ||
     cmd.includes('cat <<') ||
     cmd.includes('tee ') ||
-    cmd.includes(' > ') ||
+    /\b(?:echo|printf)\b.*>>?\s*(?!\/dev\/null\b)/.test(cmd) ||
+    /\b(?:node|python|python3)\b.*\b(?:writefilesync|appendfilesync|writefile\(|write_text\(|write_bytes\(|open\(.+['"]w)/.test(cmd) ||
     cmd.includes('>>') ||
     /\bsed\b.*\s-i(\s|$)/.test(cmd) ||
-    /\bperl\b.*\s-i(\s|$)/.test(cmd)
+    /\bperl\b.*\s-i(\s|$)/.test(cmd) ||
+    cmd.startsWith('touch ') ||
+    cmd.startsWith('cp ') ||
+    cmd.startsWith('mv ')
   ) {
     return 'typing';
+  }
+
+  // Search-like commands.
+  if (
+    cmd.startsWith('git grep ') ||
+    cmd.startsWith('rg ') ||
+    cmd === 'rg' ||
+    cmd.startsWith('grep ') ||
+    cmd.startsWith('find ') ||
+    cmd.startsWith('fd ') ||
+    cmd.startsWith('ag ') ||
+    cmd.startsWith('ack ')
+  ) {
+    return 'search';
   }
 
   // Read-like commands used while browsing files/logs.
@@ -309,59 +345,17 @@ function detectPreShellSfx(command: string): PreShellSfx {
     return 'read';
   }
 
-  // Search-like commands.
-  if (
-    cmd.startsWith('git grep ') ||
-    cmd.startsWith('rg ') ||
-    cmd === 'rg' ||
-    cmd.startsWith('grep ') ||
-    cmd.startsWith('find ') ||
-    cmd.startsWith('fd ')
-  ) {
-    return 'search';
-  }
-
-  return 'notification';
+  return 'working';
 }
 
-function handleParallelPreToolUse(event: HookEvent): void {
+function detectParallelToolKind(event: HookEvent): ToolUseKind {
   const uses = getParallelToolUses(event);
-  if (uses.length === 0) {
-    playSfx('working');
-    _startAmbient?.('heartbeat', AMBIENT_INTERVALS.heartbeat);
-    return;
+  if (uses.length === 0) return 'working';
+  const kinds = new Set(uses.map((u) => detectParallelUseKind(u)));
+  for (const kind of ['typing', 'search', 'read', 'notification', 'working'] as const) {
+    if (kinds.has(kind)) return kind;
   }
-
-  const hasTyping = uses.some((u) => detectParallelUseKind(u) === 'typing');
-  if (hasTyping) {
-    playSfx('write');
-    _startAmbient?.('typing', AMBIENT_INTERVALS.typing);
-    return;
-  }
-
-  const hasSearch = uses.some((u) => detectParallelUseKind(u) === 'search');
-  if (hasSearch) {
-    playSfx('search');
-    _startAmbient?.('heartbeat', AMBIENT_INTERVALS.heartbeat);
-    return;
-  }
-
-  const hasRead = uses.some((u) => detectParallelUseKind(u) === 'read');
-  if (hasRead) {
-    playSfx('read');
-    _startAmbient?.('heartbeat', AMBIENT_INTERVALS.heartbeat);
-    return;
-  }
-
-  const hasNotify = uses.some((u) => detectParallelUseKind(u) === 'notification');
-  if (hasNotify) {
-    playSfx('notification');
-    _startAmbient?.('heartbeat', AMBIENT_INTERVALS.heartbeat);
-    return;
-  }
-
-  playSfx('working');
-  _startAmbient?.('heartbeat', AMBIENT_INTERVALS.heartbeat);
+  return 'working';
 }
 
 function getParallelToolUses(event: HookEvent): Array<Record<string, unknown>> {
@@ -372,7 +366,7 @@ function getParallelToolUses(event: HookEvent): Array<Record<string, unknown>> {
   );
 }
 
-function detectParallelUseKind(use: Record<string, unknown>): 'typing' | 'read' | 'search' | 'notification' | 'working' {
+function detectParallelUseKind(use: Record<string, unknown>): ToolUseKind {
   const recipient = String(use.recipient_name ?? '').toLowerCase();
   const tool = recipient.split('.').pop() ?? recipient;
   const parameters = asRecord(use.parameters) ?? {};
