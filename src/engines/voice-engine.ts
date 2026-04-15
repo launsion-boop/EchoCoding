@@ -4,8 +4,9 @@ import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { getConfig } from '../config.js';
 import { shouldThrottle, recordUsage } from '../throttle.js';
-import { playAudioFile, playAudioFileAsync } from './sfx-engine.js';
+import { playAudioFileAsync } from './sfx-engine.js';
 import { signRequest } from '../auth.js';
+import { clearTtsPlaybackReference, registerTtsPlaybackReference } from './echo-guard.js';
 
 // Lazy-loaded sherpa-onnx-node (CJS module)
 import { createRequire } from 'node:module';
@@ -25,9 +26,15 @@ function getSherpa(): typeof import('sherpa-onnx-node') | null {
 }
 
 const TEMP_DIR = path.join(os.tmpdir(), 'echocoding-tts');
+const TTS_WARMUP_INTERVAL_MS = 3_000;
+const TTS_WARMUP_SILENCE_MS = 90;
+const ECHO_DECODE_TIMEOUT_MS = 420;
 
 // Singleton TTS instance (reused across calls)
 let ttsInstance: InstanceType<typeof import('sherpa-onnx-node').OfflineTts> | null = null;
+let ttsPlaybackQueue: Promise<void> = Promise.resolve();
+let ttsWarmupFilePath: string | null = null;
+let lastTtsWarmupAt = 0;
 
 // --- Kokoro v1.1-zh speaker ID ranges ---
 // sid 0-2:    English female (3 speakers)
@@ -64,48 +71,185 @@ function selectKokoroSid(text: string): number {
   return isChinese ? KOKORO_DEFAULTS['zh-female'] : KOKORO_DEFAULTS['en-female'];
 }
 
+async function enqueueTtsPlayback(task: () => Promise<void>): Promise<void> {
+  const run = ttsPlaybackQueue.catch(() => { /* keep queue healthy */ }).then(task);
+  ttsPlaybackQueue = run.catch(() => { /* keep queue healthy */ });
+  return run;
+}
+
+function getOrCreateTtsWarmupFile(): string {
+  if (ttsWarmupFilePath && fs.existsSync(ttsWarmupFilePath)) {
+    return ttsWarmupFilePath;
+  }
+
+  fs.mkdirSync(TEMP_DIR, { recursive: true });
+  const filePath = path.join(TEMP_DIR, 'tts-warmup-silence.wav');
+  const sampleRate = 16_000;
+  const channels = 1;
+  const bitsPerSample = 16;
+  const sampleCount = Math.max(1, Math.floor((sampleRate * TTS_WARMUP_SILENCE_MS) / 1000));
+  const pcm = Buffer.alloc(sampleCount * 2, 0);
+
+  const blockAlign = channels * (bitsPerSample / 8);
+  const byteRate = sampleRate * blockAlign;
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0, 'ascii');
+  header.writeUInt32LE(36 + pcm.length, 4);
+  header.write('WAVE', 8, 'ascii');
+  header.write('fmt ', 12, 'ascii');
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(bitsPerSample, 34);
+  header.write('data', 36, 'ascii');
+  header.writeUInt32LE(pcm.length, 40);
+
+  fs.writeFileSync(filePath, Buffer.concat([header, pcm]));
+  ttsWarmupFilePath = filePath;
+  return filePath;
+}
+
+async function warmupAudioOutputIfNeeded(): Promise<void> {
+  if (os.platform() !== 'darwin') return;
+  const now = Date.now();
+  if ((now - lastTtsWarmupAt) < TTS_WARMUP_INTERVAL_MS) return;
+  lastTtsWarmupAt = now;
+
+  try {
+    const warmupFile = getOrCreateTtsWarmupFile();
+    await playAudioFileAsync(warmupFile, 0);
+  } catch {
+    // Warmup failures should never block TTS.
+  }
+}
+
+function waitMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function float32ToInt16Pcm(samples: Float32Array): Int16Array {
+  const pcm = new Int16Array(samples.length);
+  for (let i = 0; i < samples.length; i++) {
+    const x = Math.max(-1, Math.min(1, samples[i] || 0));
+    pcm[i] = x < 0 ? Math.round(x * 32768) : Math.round(x * 32767);
+  }
+  return pcm;
+}
+
+async function decodeCompressedToPcm16kMono(
+  audioBuffer: Buffer,
+  inputFormat: 'mp3' | 'wav' = 'mp3',
+): Promise<Int16Array | null> {
+  return new Promise((resolve) => {
+    const args = [
+      '-hide_banner',
+      '-loglevel', 'error',
+      '-f', inputFormat,
+      '-i', 'pipe:0',
+      '-f', 's16le',
+      '-ac', '1',
+      '-ar', '16000',
+      'pipe:1',
+    ];
+
+    const ffmpeg = spawn('ffmpeg', args, {
+      stdio: ['pipe', 'pipe', 'ignore'],
+    });
+
+    const chunks: Buffer[] = [];
+    let settled = false;
+
+    const finish = (pcm: Int16Array | null) => {
+      if (settled) return;
+      settled = true;
+      resolve(pcm);
+    };
+
+    ffmpeg.stdout?.on('data', (chunk: Buffer) => {
+      if (chunk.length > 0) chunks.push(Buffer.from(chunk));
+    });
+
+    ffmpeg.on('error', () => finish(null));
+    ffmpeg.on('close', (code) => {
+      if (code !== 0) {
+        finish(null);
+        return;
+      }
+      const raw = Buffer.concat(chunks);
+      if (raw.length < 2) {
+        finish(null);
+        return;
+      }
+      const samples = Math.floor(raw.length / 2);
+      const pcm = new Int16Array(samples);
+      for (let i = 0; i < samples; i++) {
+        pcm[i] = raw.readInt16LE(i * 2);
+      }
+      finish(pcm);
+    });
+
+    try {
+      ffmpeg.stdin?.end(audioBuffer);
+    } catch {
+      finish(null);
+    }
+  });
+}
+
+interface SpeakOptions {
+  force?: boolean;
+  onPlaybackStart?: () => void;
+}
+
 // --- Public API ---
 
-export async function speak(text: string): Promise<void> {
+export async function speak(text: string, options: SpeakOptions = {}): Promise<void> {
   const config = getConfig();
 
   if (!config.tts.enabled || config.mode === 'mute' || config.mode === 'sfx-only') {
     return;
   }
 
-  if (shouldThrottle('tts', text, {
-    minInterval: config.tts.throttle.minInterval,
-    dedupWindow: config.tts.throttle.dedupWindow,
-  })) {
-    return;
+  if (!options.force) {
+    if (shouldThrottle('tts', text, {
+      minInterval: config.tts.throttle.minInterval,
+      dedupWindow: config.tts.throttle.dedupWindow,
+    })) {
+      return;
+    }
   }
 
   recordUsage('tts', text);
 
-  try {
-    if (config.tts.provider === 'local') {
-      await speakLocal(text);
-    } else {
-      await speakCloud(text);
-    }
-  } catch (err) {
-    // All providers failed, try system fallback
+  await enqueueTtsPlayback(async () => {
     try {
-      await speakSystemFallback(stripEmotionTags(text));
-    } catch { /* truly silent failure */ }
-  }
+      if (config.tts.provider === 'local') {
+        await speakLocal(text, options);
+      } else {
+        await speakCloud(text, options);
+      }
+    } catch (err) {
+      // All providers failed, try system fallback
+      try {
+        await speakSystemFallback(stripEmotionTags(text), options.onPlaybackStart);
+      } catch { /* truly silent failure */ }
+    }
+  });
 }
 
 // --- Local TTS via sherpa-onnx-node ---
 
-async function speakLocal(text: string): Promise<void> {
+async function speakLocal(text: string, options: SpeakOptions = {}): Promise<void> {
   const config = getConfig();
   const engine = config.tts.engine;
 
   // Kokoro via sherpa-onnx-node (no emotion tags)
   if (engine === 'kokoro') {
     const cleanText = stripEmotionTags(text);
-    await speakViaSherpa(cleanText);
+    await speakViaSherpa(cleanText, options.onPlaybackStart);
     return;
   }
 
@@ -114,16 +258,16 @@ async function speakLocal(text: string): Promise<void> {
   if (engine === 'orpheus') {
     // Try Kokoro as fallback for now, strip emotion tags
     try {
-      await speakViaSherpa(stripEmotionTags(text));
+      await speakViaSherpa(stripEmotionTags(text), options.onPlaybackStart);
       return;
     } catch { /* fall through */ }
   }
 
   // System TTS fallback
-  await speakSystemFallback(stripEmotionTags(text));
+  await speakSystemFallback(stripEmotionTags(text), options.onPlaybackStart);
 }
 
-async function speakViaSherpa(text: string): Promise<void> {
+async function speakViaSherpa(text: string, onPlaybackStart?: () => void): Promise<void> {
   const s = getSherpa();
   if (!s) {
     throw new Error('sherpa-onnx-node not available');
@@ -177,8 +321,13 @@ async function speakViaSherpa(text: string): Promise<void> {
   fs.mkdirSync(TEMP_DIR, { recursive: true });
   const tempFile = path.join(TEMP_DIR, `tts-${Date.now()}.wav`);
   s.writeWave(tempFile, { samples: audio.samples, sampleRate: audio.sampleRate });
+  const echoPcm = float32ToInt16Pcm(audio.samples);
 
   const vol = Math.round((config.volume / 100) * 100);
+  await warmupAudioOutputIfNeeded();
+  const playbackStartAt = Date.now();
+  registerTtsPlaybackReference(echoPcm, audio.sampleRate, playbackStartAt);
+  onPlaybackStart?.();
   await playAudioFileAsync(tempFile, vol);
 
   // Cleanup after playback
@@ -196,7 +345,7 @@ async function speakViaSherpa(text: string): Promise<void> {
  *
  * If user has their own Volcengine key, they can configure it to call direct.
  */
-async function speakCloud(text: string): Promise<void> {
+async function speakCloud(text: string, options: SpeakOptions = {}): Promise<void> {
   const config = getConfig();
   const { endpoint, apiKey } = config.tts.cloud;
 
@@ -220,9 +369,25 @@ async function speakCloud(text: string): Promise<void> {
     // Our proxy (api.echoclaw.com) — simplified request, proxy adds key
     audioBuffer = await callProxyTts(cleanText, config, endpoint, emotion);
   }
+  const echoDecodePromise = decodeCompressedToPcm16kMono(audioBuffer, 'mp3').catch(() => null);
+  const eagerEchoPcm = await Promise.race<Int16Array | null>([
+    echoDecodePromise,
+    waitMs(ECHO_DECODE_TIMEOUT_MS).then(() => null),
+  ]);
 
   fs.writeFileSync(tempFile, audioBuffer);
   const vol = Math.round((config.volume / 100) * 100);
+  await warmupAudioOutputIfNeeded();
+  const playbackStartAt = Date.now();
+  if (eagerEchoPcm) {
+    registerTtsPlaybackReference(eagerEchoPcm, 16_000, playbackStartAt);
+  } else {
+    void echoDecodePromise.then((pcm) => {
+      if (!pcm) return;
+      registerTtsPlaybackReference(pcm, 16_000, playbackStartAt);
+    }).catch(() => { /* ignore echo reference decode failure */ });
+  }
+  options.onPlaybackStart?.();
   await playAudioFileAsync(tempFile, vol);
 
   setTimeout(() => {
@@ -368,18 +533,22 @@ function resolveVolcVoice(voice: string, text: string): string {
 
 // --- System Fallback ---
 
-async function speakSystemFallback(text: string): Promise<void> {
+async function speakSystemFallback(text: string, onPlaybackStart?: () => void): Promise<void> {
   const platform = os.platform();
   const config = getConfig();
+  clearTtsPlaybackReference();
 
   if (platform === 'darwin') {
     const rate = Math.round(180 * config.tts.speed);
+    await warmupAudioOutputIfNeeded();
+    onPlaybackStart?.();
     const child = spawn('say', ['-r', String(rate), text], {
       stdio: 'ignore',
       detached: true,
     });
     child.unref();
   } else if (platform === 'linux') {
+    onPlaybackStart?.();
     const child = spawn('espeak', [text], {
       stdio: 'ignore',
       detached: true,
@@ -425,8 +594,14 @@ export function cleanupTempFiles(): void {
       }
     }
   } catch { /* ignore */ }
+  ttsWarmupFilePath = null;
+  clearTtsPlaybackReference();
 }
 
 export function disposeTts(): void {
   ttsInstance = null;
+  ttsPlaybackQueue = Promise.resolve();
+  ttsWarmupFilePath = null;
+  lastTtsWarmupAt = 0;
+  clearTtsPlaybackReference();
 }

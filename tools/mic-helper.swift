@@ -365,7 +365,7 @@ final class HudOverlayController: NSObject {
     private var closeRequested = false
     private var minVisibleUntil: Date?
     private var sawTerminalMessage = false
-    private let maxConversationLines = 200
+    private let maxConversationTurns = 2
 
     init(socketFd: Int32) {
         self.socketFd = socketFd
@@ -393,11 +393,11 @@ final class HudOverlayController: NSObject {
     }
 
     private func setupWindow() {
-        let width: CGFloat = 640
-        let height: CGFloat = 340
+        let width: CGFloat = 500
+        let height: CGFloat = 210
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
         let x = screen.midX - (width / 2)
-        let y = screen.maxY - height - 28
+        let y = screen.maxY - height - 10
         let frame = NSRect(x: x, y: y, width: width, height: height)
 
         let panel = NSPanel(
@@ -421,29 +421,29 @@ final class HudOverlayController: NSObject {
         let content = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         panel.contentView = content
 
-        let titleLabel = NSTextField(labelWithString: "EchoCoding Voice Ask")
-        titleLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        let titleLabel = NSTextField(labelWithString: "EchoCoding Ask")
+        titleLabel.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
         titleLabel.textColor = NSColor(calibratedWhite: 0.87, alpha: 1.0)
         titleLabel.frame = NSRect(x: 18, y: height - 38, width: width - 36, height: 18)
         content.addSubview(titleLabel)
 
         let status = NSTextField(labelWithString: "Listening")
-        status.font = NSFont.monospacedSystemFont(ofSize: 14, weight: .medium)
+        status.font = NSFont.monospacedSystemFont(ofSize: 16, weight: .medium)
         status.textColor = NSColor(calibratedRed: 0.57, green: 0.85, blue: 1.0, alpha: 1.0)
         status.frame = NSRect(x: 18, y: height - 62, width: width - 36, height: 18)
         content.addSubview(status)
         self.statusLabel = status
 
-        let timelineHeader = NSTextField(labelWithString: "Conversation")
-        timelineHeader.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        let timelineHeader = NSTextField(labelWithString: "Recent (2 turns)")
+        timelineHeader.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
         timelineHeader.textColor = NSColor(calibratedWhite: 0.72, alpha: 1.0)
         timelineHeader.frame = NSRect(x: 18, y: height - 84, width: width - 36, height: 14)
         content.addSubview(timelineHeader)
 
-        let scrollFrame = NSRect(x: 18, y: 16, width: width - 36, height: height - 108)
+        let scrollFrame = NSRect(x: 18, y: 14, width: width - 36, height: height - 104)
         let scrollView = NSScrollView(frame: scrollFrame)
         scrollView.borderType = .noBorder
-        scrollView.hasVerticalScroller = true
+        scrollView.hasVerticalScroller = false
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = false
@@ -452,9 +452,9 @@ final class HudOverlayController: NSObject {
         textView.isEditable = false
         textView.isSelectable = false
         textView.drawsBackground = false
-        textView.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        textView.font = NSFont.monospacedSystemFont(ofSize: 15, weight: .regular)
         textView.textColor = NSColor(calibratedWhite: 0.9, alpha: 1.0)
-        textView.string = "AI: HUD ready. Start talking whenever you want.\n"
+        textView.string = ""
         textView.textContainerInset = NSSize(width: 4, height: 6)
         textView.textContainer?.lineBreakMode = .byWordWrapping
         textView.textContainer?.widthTracksTextView = true
@@ -465,7 +465,7 @@ final class HudOverlayController: NSObject {
         scrollView.documentView = textView
         content.addSubview(scrollView)
         self.conversationView = textView
-        self.conversationLines = ["AI: HUD ready. Start talking whenever you want."]
+        self.conversationLines = []
 
         panel.orderFrontRegardless()
         NSApp.activate(ignoringOtherApps: false)
@@ -520,8 +520,9 @@ final class HudOverlayController: NSObject {
     }
 
     private func trimConversationIfNeeded() {
+        let maxConversationLines = maxConversationTurns * 2
         if conversationLines.count <= maxConversationLines { return }
-        conversationLines.removeFirst(conversationLines.count - maxConversationLines)
+        conversationLines = Array(conversationLines.suffix(maxConversationLines))
     }
 
     private func appendConversationLine(_ line: String) {
@@ -539,7 +540,11 @@ final class HudOverlayController: NSObject {
            !draft.isEmpty {
             lines.append("You: \(draft) ...")
         }
-        view.string = lines.joined(separator: "\n")
+        if lines.isEmpty {
+            view.string = "AI: Waiting for voice..."
+        } else {
+            view.string = lines.joined(separator: "\n")
+        }
         view.scrollToEndOfDocument(nil)
     }
 
@@ -556,10 +561,8 @@ final class HudOverlayController: NSObject {
             currentUserDraft = nil
             if (msg["clear"] as? Bool) == true {
                 conversationLines.removeAll(keepingCapacity: true)
-                appendConversationLine("AI: HUD ready. Start talking whenever you want.")
-            } else {
-                renderConversation()
             }
+            renderConversation()
             updateStatusUI()
         case "prompt":
             let text = (msg["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""

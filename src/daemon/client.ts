@@ -2,7 +2,7 @@ import net from 'node:net';
 import { getConfig, resolveDaemonPaths } from '../config.js';
 
 interface DaemonMessage {
-  type: 'hook' | 'say' | 'sfx' | 'ask' | 'listen' | 'ping';
+  type: 'hook' | 'say' | 'sfx' | 'ask' | 'listen' | 'ask-end' | 'ping';
   data?: Record<string, unknown>;
   text?: string;
   name?: string;
@@ -134,4 +134,8 @@ export async function sendAsk(text: string): Promise<string> {
 
 export async function sendListen(): Promise<string> {
   return sendWithResponse({ type: 'listen' });
+}
+
+export async function sendAskEnd(): Promise<string> {
+  return sendWithResponse({ type: 'ask-end' }, 5_000);
 }

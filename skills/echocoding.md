@@ -104,6 +104,7 @@ Voice mode shortens **narration** (preamble, transitions, filler), NOT content (
 - Treat ASK as a multi-turn dialog channel, not a one-shot prompt.
 - If the answer is ambiguous or incomplete, immediately issue a focused follow-up ASK in the same context.
 - Ask one intent at a time (short sentence), then wait for user speech.
+- Assume ASR may be noisy (background sound / homophone errors). For key confirmations, restate and confirm again until intent is explicit.
 - HUD is session-scoped: keep dialog flowing while either side is interacting; inactivity timeout is sliding 60 seconds after the last interaction.
 - End the session only when requirements are confirmed (or user explicitly stops), then continue execution.
 
