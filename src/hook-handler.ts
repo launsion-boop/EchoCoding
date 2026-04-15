@@ -1,4 +1,4 @@
-import { playSfx } from './engines/sfx-engine.js';
+import { playSfx, playSfxAmbient } from './engines/sfx-engine.js';
 
 // Ambient control — injected by daemon at init time
 let _startAmbient: ((name: string, intervalMs?: number) => void) | null = null;
@@ -8,6 +8,8 @@ const AMBIENT_INTERVALS = {
   heartbeat: 1600,
   typing: 900,
 } as const;
+const THINKING_CUE_MIN_INTERVAL_MS = 450;
+let lastThinkingCueAt = 0;
 
 export function setAmbientControls(
   start: (name: string, intervalMs?: number) => void,
@@ -46,7 +48,7 @@ export function handleHookEvent(event: HookEvent): void {
   const { hook_event_name } = event;
 
   // Ambient loop management:
-  // - UserPromptSubmit → thinking ambient
+  // - UserPromptSubmit → submit + thinking cue, then heartbeat ambient
   // - PreToolUse → semantic SFX + ambient (typing for edits, heartbeat otherwise)
   // - PostToolUse → keep typing ambient after successful writes, else heartbeat
   // - Stop → stop all ambient
@@ -60,8 +62,9 @@ export function handleHookEvent(event: HookEvent): void {
     case 'UserPromptSubmit':
       _stopAmbient?.();
       playSfx('submit');
-      // Start thinking ambient — keeps playing until first tool use or stop
-      _startAmbient?.('thinking', AMBIENT_INTERVALS.thinking);
+      // Entering model-thinking state: play a cue, keep heartbeat running.
+      maybePlayThinkingCue(true);
+      _startAmbient?.('heartbeat', AMBIENT_INTERVALS.heartbeat);
       break;
 
     case 'PreToolUse':
@@ -173,8 +176,20 @@ function startPostToolAmbient(event: HookEvent, toolKind: ToolUseKind): void {
     _startAmbient?.('typing', AMBIENT_INTERVALS.typing);
     return;
   }
-  // Default: heartbeat while model is still planning next action.
+  // Model is back to planning state between tool calls.
+  maybePlayThinkingCue();
   _startAmbient?.('heartbeat', AMBIENT_INTERVALS.heartbeat);
+}
+
+function maybePlayThinkingCue(force = false): void {
+  const now = Date.now();
+  if (!force && now - lastThinkingCueAt < THINKING_CUE_MIN_INTERVAL_MS) {
+    return;
+  }
+  lastThinkingCueAt = now;
+  // Thinking cue should track UI state transitions reliably.
+  // Use ambient playback (no throttle) and rely on local cooldown above.
+  playSfxAmbient('thinking');
 }
 
 function handleStop(event: HookEvent): void {
@@ -291,7 +306,8 @@ function detectPreShellSfx(command: string): PreShellSfx {
     cmd.includes('apply_patch') ||
     cmd.startsWith('git apply ') ||
     cmd.startsWith('patch ') ||
-    cmd.includes('cat <<') ||
+    hasHereDocWrite(cmd) ||
+    hasShellFileRedirectWrite(cmd) ||
     cmd.includes('tee ') ||
     /\b(?:echo|printf)\b.*>>?\s*(?!\/dev\/null\b)/.test(cmd) ||
     /\b(?:node|python|python3)\b.*\b(?:writefilesync|appendfilesync|writefile\(|write_text\(|write_bytes\(|open\(.+['"]w)/.test(cmd) ||
@@ -346,6 +362,22 @@ function detectPreShellSfx(command: string): PreShellSfx {
   }
 
   return 'working';
+}
+
+function hasHereDocWrite(cmd: string): boolean {
+  if (!cmd.includes('<<')) return false;
+  return /\b(?:cat|tee|python|python3|node|ruby|perl|awk|sed|bash|sh)\b[\s\S]*<<[-~]?\s*['"]?[a-z0-9_]+['"]?/.test(
+    cmd,
+  );
+}
+
+function hasShellFileRedirectWrite(cmd: string): boolean {
+  if (!cmd.includes('>')) return false;
+  if (!/\b(?:echo|printf|cat|tee)\b/.test(cmd)) return false;
+  if (/(?:^|\s)\d?>>?\s*\/dev\/null\b/.test(cmd)) return false;
+  // Treat explicit output redirection as a write action.
+  // Examples: "cat > file", "printf ... >> file", "tee > file".
+  return /(?:^|[;&|])[\s\S]*?(?:>>?|>\|)\s*(?:['"`$./~]|[a-z0-9_\/-])/.test(cmd);
 }
 
 function detectParallelToolKind(event: HookEvent): ToolUseKind {
