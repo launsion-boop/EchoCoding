@@ -46,6 +46,9 @@ function hasManagedHooks(): boolean {
     const hasAutoStart = sessionStart.some((group) =>
       (group.hooks ?? []).some((hook) => hook.command?.includes('auto-start')),
     );
+    const hasVoiceAutoMode = sessionStart.some((group) =>
+      (group.hooks ?? []).some((hook) => hook.command?.includes('voice-auto-mode')),
+    );
     const hasReminder = userPromptSubmit.some((group) =>
       (group.hooks ?? []).some((hook) => hook.command?.includes('voice-reminder')),
     );
@@ -55,7 +58,7 @@ function hasManagedHooks(): boolean {
       ),
     );
 
-    return hasAutoStart && hasReminder && hasHookPipeline;
+    return hasAutoStart && hasVoiceAutoMode && hasReminder && hasHookPipeline;
   } catch {
     return false;
   }

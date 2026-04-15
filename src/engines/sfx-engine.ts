@@ -41,10 +41,19 @@ const SUPPORTED_EXTENSIONS = ['.mp3', '.wav', '.ogg', '.m4a', '.aiff'];
 const SFX_THROTTLE_OVERRIDES: Record<string, Partial<ThrottleOptions>> = {
   write: { minInterval: 0.15, dedupWindow: 0.5 },
   typing: { minInterval: 0.15, dedupWindow: 0.4 },
+  thinking: { minInterval: 0.2, dedupWindow: 0.6 },
   read: { minInterval: 0.35, dedupWindow: 0.8 },
   search: { minInterval: 0.35, dedupWindow: 0.8 },
   notification: { minInterval: 0.5, dedupWindow: 0.9 },
   working: { minInterval: 0.5, dedupWindow: 0.9 },
+};
+
+// Typing/write assets are intentionally quiet to avoid fatigue.
+// Boost them at runtime so editing feedback stays audible at normal global volume.
+const SFX_VOLUME_MULTIPLIERS: Record<string, number> = {
+  write: 2.0,
+  typing: 2.8,
+  thinking: 2.2,
 };
 
 export function playSfx(name: string): void {
@@ -64,7 +73,7 @@ export function playSfx(name: string): void {
     return;
   }
 
-  const volume = Math.round((config.volume / 100) * (config.sfx.volume / 100) * 100);
+  const volume = resolveSfxVolume(name, config.volume, config.sfx.volume);
   playAudioFile(soundFile, volume);
   recordUsage('sfx:' + name);
 }
@@ -181,8 +190,15 @@ export function playSfxAmbient(name: string): void {
   }
   const soundFile = resolveSoundFile(name);
   if (!soundFile) return;
-  const volume = Math.round((config.volume / 100) * (config.sfx.volume / 100) * 100);
+  const volume = resolveSfxVolume(name, config.volume, config.sfx.volume);
   playAudioFile(soundFile, volume);
+}
+
+function resolveSfxVolume(name: string, masterVolume: number, sfxVolume: number): number {
+  const base = (masterVolume / 100) * (sfxVolume / 100) * 100;
+  const multiplier = SFX_VOLUME_MULTIPLIERS[name] ?? 1;
+  // afplay accepts >1.0 volume, so allow moderate boost but cap to avoid clipping.
+  return Math.max(0, Math.min(250, Math.round(base * multiplier)));
 }
 
 export function listAvailableSfx(): string[] {

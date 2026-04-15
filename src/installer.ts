@@ -282,6 +282,11 @@ function getCodexAutoStartCommand(): string {
   return `ECHOCODING_CLIENT=codex ECHOCODING_NODE=${shellQuote(process.execPath)} bash ${shellQuote(script)}`;
 }
 
+function getCodexVoiceAutoModeCommand(): string {
+  const script = path.join(getPackageRoot(), 'scripts', 'voice-auto-mode.sh');
+  return `ECHOCODING_HOOK_CLIENT=codex bash ${shellQuote(script)}`;
+}
+
 export function installCodex(): { success: boolean; message: string } {
   if (!fs.existsSync(CODEX_DIR)) {
     return { success: false, message: 'Codex CLI config directory not found' };
@@ -493,9 +498,14 @@ function readCodexHooksFile(): CodexHooksFile {
 function upsertCodexHooks(config: CodexHooksFile): CodexHooksFile {
   const next: CodexHooksFile = { ...config, hooks: { ...(config.hooks ?? {}) } };
 
-  upsertCodexManagedGroup(next.hooks!, 'SessionStart', ['echocoding-hook', 'auto-start'], {
+  upsertCodexManagedGroup(next.hooks!, 'SessionStart', ['echocoding-hook', 'auto-start', 'voice-auto-mode'], {
     matcher: 'startup|resume',
     hooks: [
+      {
+        type: 'command',
+        command: getCodexVoiceAutoModeCommand(),
+        statusMessage: 'Syncing EchoCoding voice mode',
+      },
       {
         type: 'command',
         command: getCodexAutoStartCommand(),
@@ -548,6 +558,7 @@ function removeCodexHooks(config: CodexHooksFile): CodexHooksFile {
           (hook) =>
             !hook.command.includes('echocoding-hook') &&
             !hook.command.includes('voice-reminder') &&
+            !hook.command.includes('voice-auto-mode') &&
             !hook.command.includes('auto-start'),
         ),
       }))

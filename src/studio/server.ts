@@ -17,10 +17,11 @@ import { createRequire } from 'node:module';
 
 const _require = createRequire(import.meta.url);
 
-// Studio always writes global config — unset client env vars so saveConfig
-// doesn't scope voiceLevel/mode/enabled into a per-client override.
-delete process.env.ECHOCODING_CLIENT;
-delete process.env.ECHOCODING_HOOK_CLIENT;
+// Studio must always write global config.
+// Explicitly force runtime client to `default` so CODEX_/CLAUDE_ env markers
+// don't scope writes into clients.codex / clients.claude.
+process.env.ECHOCODING_CLIENT = 'default';
+process.env.ECHOCODING_HOOK_CLIENT = 'default';
 
 const TEMP_DIR = path.join(os.tmpdir(), 'echocoding-studio');
 const STUDIO_PREVIEW_TEXT = {
