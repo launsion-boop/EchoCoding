@@ -372,11 +372,11 @@ function isLikelyPromptEchoPartial(partialText: string, promptText: string): boo
   const partial = normalizeEchoText(partialText);
   const prompt = normalizeEchoText(promptText);
   if (!partial || !prompt) return false;
-  if (partial.length < 2) return false;
+  if (partial.length < 1) return false;
 
   // Streaming ASR often emits progressive prompt prefixes first.
-  if (prompt.startsWith(partial) && partial.length >= 2) return true;
-  if (partial.startsWith(prompt) && prompt.length >= 2) return true;
+  if (prompt.startsWith(partial) && partial.length >= 1) return true;
+  if (partial.startsWith(prompt) && prompt.length >= 1) return true;
 
   return isLikelyPromptEcho(partialText, promptText);
 }
