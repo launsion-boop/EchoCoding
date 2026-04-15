@@ -159,7 +159,7 @@ function createDefaultConfig(env: NodeJS.ProcessEnv = process.env): EchoConfig {
       },
       // First-run default: Chinese systems use 湾湾小何, others use English female.
       voice: detectDefaultCloudVoice(env),
-      volume: 100,
+      volume: 50,
       speed: 1.0,
       language: 'auto',
       emotion: true,
