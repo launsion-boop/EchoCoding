@@ -8,6 +8,7 @@ export type TtsProvider = 'local' | 'cloud';
 export type TtsEngine = 'orpheus' | 'kokoro' | 'system';
 export type AsrProvider = 'local' | 'cloud';
 export type AsrEngine = 'paraformer' | 'whisper';
+export type AsrNoiseProfile = 'normal' | 'high-noise';
 
 export type VoiceLevel = 'minimal' | 'balanced' | 'verbose';
 export type EchoClientId = 'default' | 'claude' | 'codex';
@@ -80,6 +81,11 @@ export interface EchoConfig {
       minSpeechMs: number;
       noSpeechTimeoutMs: number;
       maxDurationMs: number;
+    };
+    noiseControl: {
+      profile: AsrNoiseProfile;
+      adaptiveRms: boolean;
+      denoise: boolean;
     };
     timeout: number;
   };
@@ -184,6 +190,11 @@ function createDefaultConfig(env: NodeJS.ProcessEnv = process.env): EchoConfig {
         minSpeechMs: 500,
         noSpeechTimeoutMs: 15000,
         maxDurationMs: 90000,
+      },
+      noiseControl: {
+        profile: 'normal',
+        adaptiveRms: true,
+        denoise: true,
       },
       timeout: 90,
     },

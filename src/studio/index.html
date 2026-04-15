@@ -652,6 +652,9 @@
     const provider = config.tts?.provider || 'local';
     const voiceLevel = config.voiceLevel || 'balanced';
     const localVoice = config.tts?.voice || 'default';
+    const noiseProfile = config.asr?.noiseControl?.profile || 'normal';
+    const adaptiveRmsEnabled = config.asr?.noiseControl?.adaptiveRms ?? true;
+    const denoiseEnabled = config.asr?.noiseControl?.denoise ?? true;
 
     // General settings (always visible)
     document.getElementById('settingsGeneral').innerHTML = `
@@ -691,6 +694,25 @@
           <option value="balanced" ${voiceLevel === 'balanced' ? 'selected' : ''}>Balanced (most turns)</option>
           <option value="verbose" ${voiceLevel === 'verbose' ? 'selected' : ''}>Verbose (every action)</option>
         </select>
+      </div>
+      <div class="setting-item">
+        <label>ASR Noise Profile</label>
+        <select onchange="updateSetting('asr.noiseControl.profile', this.value)">
+          <option value="normal" ${noiseProfile === 'normal' ? 'selected' : ''}>Normal</option>
+          <option value="high-noise" ${noiseProfile === 'high-noise' ? 'selected' : ''}>High Noise (steadier, less sensitive)</option>
+        </select>
+      </div>
+      <div class="setting-item">
+        <div class="toggle-row">
+          <label>Adaptive RMS Threshold</label>
+          <div class="toggle ${adaptiveRmsEnabled ? 'on' : ''}" onclick="toggleSetting('asr.noiseControl.adaptiveRms', this)"></div>
+        </div>
+      </div>
+      <div class="setting-item">
+        <div class="toggle-row">
+          <label>Light Denoise Preprocess</label>
+          <div class="toggle ${denoiseEnabled ? 'on' : ''}" onclick="toggleSetting('asr.noiseControl.denoise', this)"></div>
+        </div>
       </div>
       <div class="setting-item">
         <div class="toggle-row">
