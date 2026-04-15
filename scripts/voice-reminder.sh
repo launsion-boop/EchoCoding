@@ -51,8 +51,8 @@ esac
 case "$LEVEL" in
   balanced)
     emit_reminder \
-      "<user-prompt-submit-hook>💡 平衡模式：有重要信息/结论/问题时先 echocoding say 一句摘要。⚠️ 需要反问用户时必须用 echocoding ask，不能文字提问。ASK 流程：ask 返回结果后 HUD 保持开着→拿到满意答案后立即 ask-end 关闭 HUD→继续执行；答案不够直接再 ask；忘了关就 60 秒自动关。关键确认需复述并二次确认。</user-prompt-submit-hook>" \
-      "EchoCoding 平衡模式：有重要信息/结论先 \`echocoding say\`。⚠️ 反问用户必须 \`echocoding ask\`。ASK 流程：ask 返回后 HUD 保持 → 满意答案后 \`ask-end\` 关闭 → 继续执行；不满意直接再 ask；忘关 60s 自动关。关键确认请复述。"
+      "<user-prompt-submit-hook>🔊【必须】完成任务/代码改动/Bug修复/重要结论 → 立即 echocoding say 播报一句摘要，再输出文字。不能只回复文字不播报。⚠️ 反问用户必须用 echocoding ask，禁止文字提问。ASK 流程：ask 返回后 HUD 保持开→满意答案后 ask-end 关闭→继续；忘关 60s 自动关。</user-prompt-submit-hook>" \
+      "EchoCoding 平衡模式【必须】：完成任务/代码改动/结论 → 先 \`echocoding say\` 播报，再输出文字，不能只回文字。⚠️ 反问必须 \`echocoding ask\`。ask 返回后 HUD 保持 → 满意后 \`ask-end\` 关→继续；忘关 60s 自动关。"
     ;;
   verbose)
     emit_reminder \
