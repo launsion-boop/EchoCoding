@@ -27,6 +27,7 @@ const ASK_GATE_MAX_WAIT_MS = 280;
 const ASK_GATE_QUIET_FACTOR = 0.75;
 const ASK_TTS_START_GATE_TIMEOUT_MS = 1_500;
 const ASK_TTS_START_ANTIBLEED_MS = 260;
+const ASK_TTS_POST_ECHO_GUARD_MS = 1_800;
 const ASK_PROMPT_ECHO_RETRY_MAX = 2;
 const ASK_RECOVERABLE_ERROR_RETRY_MAX = 3;
 const ASK_RECOVERABLE_ERROR_BACKOFF_MS = 180;
@@ -110,6 +111,7 @@ interface ListenOptions {
   askSession?: boolean;
   finalizeResult?: boolean;
   duringTtsRequireDoubleTalk?: (() => boolean) | undefined;
+  promptEchoFilter?: ((text: string) => boolean) | undefined;
 }
 
 interface AskOptions {
@@ -363,6 +365,20 @@ function isLikelyPromptEcho(recognizedText: string, promptText: string): boolean
     return recognizedRatio >= 0.78 && promptRatio >= 0.78;
   }
   return recognizedRatio >= 0.9 && promptRatio >= 0.5;
+}
+
+function isLikelyPromptEchoPartial(partialText: string, promptText: string): boolean {
+  if (!partialText || !promptText) return false;
+  const partial = normalizeEchoText(partialText);
+  const prompt = normalizeEchoText(promptText);
+  if (!partial || !prompt) return false;
+  if (partial.length < 2) return false;
+
+  // Streaming ASR often emits progressive prompt prefixes first.
+  if (prompt.startsWith(partial) && partial.length >= 2) return true;
+  if (partial.startsWith(prompt) && prompt.length >= 2) return true;
+
+  return isLikelyPromptEcho(partialText, promptText);
 }
 
 function isRecoverableAskError(err: unknown): boolean {
@@ -841,22 +857,29 @@ export async function ask(
       hud.updateStatus('Assistant speaking', true);
       let promptShown = false;
       let ttsPlaybackActive = true;
+      let ttsEchoGuardUntil = Date.now() + ASK_TTS_POST_ECHO_GUARD_MS;
+      const extendTtsEchoGuard = () => {
+        ttsEchoGuardUntil = Math.max(ttsEchoGuardUntil, Date.now() + ASK_TTS_POST_ECHO_GUARD_MS);
+      };
       const speakTask = speak(question, {
         force: true,
         onPlaybackStart: () => {
           openStartGate();
+          extendTtsEchoGuard();
           if (promptShown) return;
           promptShown = true;
           if (prompt) hud.updatePrompt(prompt);
         },
       }).catch(() => {
         openStartGate();
+        extendTtsEchoGuard();
         if (!promptShown && prompt) {
           promptShown = true;
           hud.updatePrompt(prompt);
         }
       }).finally(() => {
         ttsPlaybackActive = false;
+        extendTtsEchoGuard();
       });
 
       const askDeadlineAt = Date.now() + (effectiveTimeout * 1000);
@@ -881,7 +904,11 @@ export async function ask(
               skipReadyCue: true,
               askSession: hudEnabled && supportsSharedAskHud(),
               finalizeResult: false,
-              duringTtsRequireDoubleTalk: () => ttsPlaybackActive,
+              duringTtsRequireDoubleTalk: () => ttsPlaybackActive || (Date.now() <= ttsEchoGuardUntil),
+              promptEchoFilter: (text: string) => (
+                !!prompt &&
+                isLikelyPromptEchoPartial(text, prompt)
+              ),
               startGate: useStartGate ? {
                 ready: startGateReady,
                 antiBleedMs: ASK_TTS_START_ANTIBLEED_MS,
@@ -1519,6 +1546,7 @@ async function listenCloud(
         options.startGate,
         options.askSession,
         options.duringTtsRequireDoubleTalk,
+        options.promptEchoFilter,
       );
     } catch (err) {
       // Graceful downgrade for older proxy versions without /v1/asr/stream.
@@ -1980,14 +2008,19 @@ async function listenCloudProxyStream(
   startGate?: ListenStartGate,
   askSession = false,
   duringTtsRequireDoubleTalk?: () => boolean,
+  promptEchoFilter?: (text: string) => boolean,
 ): Promise<string> {
   const vadConfig = getVadRuntimeConfig(timeoutSec, vadInput, vadOverrides);
   const noiseState = createAdaptiveNoiseState(vadConfig, noiseControl);
   const ws = await openProxyAsrStream(endpoint);
   const resultPromise = createProxyStreamResultPromise(ws, (event) => {
     if (event.type === 'partial' && event.text) {
+      const partial = event.text.trim();
+      if (partial && promptEchoFilter?.(partial)) {
+        return;
+      }
       hud.updateStatus('Recognizing', true);
-      hud.updatePartial(event.text);
+      hud.updatePartial(partial);
     }
     if (event.type === 'final') {
       hud.updateStatus('Finalizing', true);
