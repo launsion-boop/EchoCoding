@@ -511,9 +511,6 @@ export async function ask(question: string, timeoutSec?: number): Promise<string
     const hud = await acquireAskHud(hudEnabled);
     try {
       hud.reset();
-      if (prompt) {
-        hud.updatePrompt(prompt);
-      }
       const startGate = createDeferred<void>();
       const listenPromise = listenWithHud(
         effectiveTimeout,
@@ -546,7 +543,11 @@ export async function ask(question: string, timeoutSec?: number): Promise<string
 
       const result = await listenPromise;
       void speakTask;
-      forceCloseHud = true;
+      forceCloseHud = (
+        result === '[timeout]' ||
+        result === '[error]' ||
+        !supportsSharedAskHud()
+      );
       return result;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
