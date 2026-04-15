@@ -85,6 +85,26 @@ func requestPermissionWithRunLoop() -> Bool {
     return granted
 }
 
+func envBool(_ key: String, defaultValue: Bool) -> Bool {
+    guard let raw = ProcessInfo.processInfo.environment[key]?.trimmingCharacters(in: .whitespacesAndNewlines),
+          !raw.isEmpty
+    else { return defaultValue }
+    switch raw.lowercased() {
+    case "1", "true", "yes", "on":
+        return true
+    case "0", "false", "no", "off":
+        return false
+    default:
+        return defaultValue
+    }
+}
+
+func shouldEnableVoiceProcessing() -> Bool {
+    // VoiceProcessingIO can trigger system ducking in some routes.
+    // Keep disabled by default so HUD/ASK TTS playback volume stays stable.
+    return envBool("ECHOCODING_MIC_VOICE_PROCESSING", defaultValue: false)
+}
+
 // MARK: - WAV Recording
 
 class Recorder: NSObject {
@@ -98,13 +118,15 @@ class Recorder: NSObject {
 
         let input = engine.inputNode
         let hwFormat = input.outputFormat(forBus: 0)
-        if #available(macOS 10.15, *) {
+        if #available(macOS 10.15, *), shouldEnableVoiceProcessing() {
             do {
                 try input.setVoiceProcessingEnabled(true)
                 debugLog("record: voice processing enabled")
             } catch {
                 debugLog("record: voice processing unavailable \(error)")
             }
+        } else {
+            debugLog("record: voice processing disabled")
         }
 
         // Target: 16kHz, mono, 16-bit signed int
@@ -250,13 +272,15 @@ class StreamRecorder: NSObject {
 
         let input = engine.inputNode
         let hwFormat = input.outputFormat(forBus: 0)
-        if #available(macOS 10.15, *) {
+        if #available(macOS 10.15, *), shouldEnableVoiceProcessing() {
             do {
                 try input.setVoiceProcessingEnabled(true)
                 debugLog("stream-record: voice processing enabled")
             } catch {
                 debugLog("stream-record: voice processing unavailable \(error)")
             }
+        } else {
+            debugLog("stream-record: voice processing disabled")
         }
 
         guard let targetFormat = AVAudioFormat(
@@ -351,6 +375,9 @@ class StreamRecorder: NSObject {
 final class HudOverlayController: NSObject {
     private let statusDotIntervalMs: Int = 350
     private let cursorBlinkIntervalMs: Int = 500
+    private let minHudOpenMs: Int = 700
+    private let postTerminalHoldMs: Int = 1600
+    private let eofCloseGraceMs: Int = 260
     private let userLinePrefix = "YOU: "
     private let socketFd: Int32
     private var fdClosed = false
@@ -365,12 +392,14 @@ final class HudOverlayController: NSObject {
     private var readSource: DispatchSourceRead?
     private var statusAnimationTimer: DispatchSourceTimer?
     private var cursorBlinkTimer: DispatchSourceTimer?
+    private var closeTimer: DispatchSourceTimer?
     private var readBuffer = Data()
     private var baseStatus = "Listening"
     private var isAnimating = false
     private var dotCount = 0
     private var closeRequested = false
     private var minVisibleUntil: Date?
+    private var scheduledCloseAt: Date?
     private var sawTerminalMessage = false
     private let maxConversationTurns = 2
 
@@ -379,6 +408,7 @@ final class HudOverlayController: NSObject {
     }
 
     func start() {
+        minVisibleUntil = Date().addingTimeInterval(Double(minHudOpenMs) / 1000.0)
         setupWindow()
         startReadLoop()
         startStatusAnimationTimer()
@@ -395,6 +425,8 @@ final class HudOverlayController: NSObject {
         statusAnimationTimer = nil
         cursorBlinkTimer?.cancel()
         cursorBlinkTimer = nil
+        closeTimer?.cancel()
+        closeTimer = nil
         closeFdIfNeeded()
     }
 
@@ -504,7 +536,7 @@ final class HudOverlayController: NSObject {
                 // Give the main queue a brief grace period before closing.
                 self.processTailBufferIfNeeded()
                 DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(180)) {
-                    self.requestClose()
+                    self.requestClose(extraHoldMs: self.eofCloseGraceMs)
                 }
                 return
             }
@@ -561,6 +593,38 @@ final class HudOverlayController: NSObject {
         }
         userDraftActive = true
         userCursorVisible = true
+    }
+
+    private func extendVisibility(ms: Int) {
+        let until = Date().addingTimeInterval(Double(max(0, ms)) / 1000.0)
+        if let existing = minVisibleUntil {
+            minVisibleUntil = max(existing, until)
+        } else {
+            minVisibleUntil = until
+        }
+    }
+
+    private func scheduleClose(at date: Date) {
+        if let scheduled = scheduledCloseAt, scheduled >= date {
+            return
+        }
+        scheduledCloseAt = date
+
+        closeTimer?.cancel()
+        closeTimer = nil
+
+        let delay = max(0.0, date.timeIntervalSinceNow)
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.main)
+        timer.schedule(deadline: .now() + delay)
+        timer.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            self.closeTimer?.cancel()
+            self.closeTimer = nil
+            self.scheduledCloseAt = nil
+            self.terminateApp()
+        }
+        closeTimer = timer
+        timer.resume()
     }
 
     private func renderConversation() {
@@ -625,7 +689,10 @@ final class HudOverlayController: NSObject {
         case "reset":
             closeRequested = false
             sawTerminalMessage = false
-            minVisibleUntil = nil
+            minVisibleUntil = Date().addingTimeInterval(Double(minHudOpenMs) / 1000.0)
+            closeTimer?.cancel()
+            closeTimer = nil
+            scheduledCloseAt = nil
             baseStatus = "Preparing"
             isAnimating = true
             dotCount = 0
@@ -661,6 +728,7 @@ final class HudOverlayController: NSObject {
             }
         case "final":
             sawTerminalMessage = true
+            extendVisibility(ms: postTerminalHoldMs)
             baseStatus = "Done"
             isAnimating = false
             dotCount = 0
@@ -675,8 +743,12 @@ final class HudOverlayController: NSObject {
             renderConversation()
             debugLog("hud: final text=\(String(text.prefix(120)))")
             updateStatusUI()
+            if closeRequested {
+                requestClose()
+            }
         case "timeout":
             sawTerminalMessage = true
+            extendVisibility(ms: postTerminalHoldMs)
             baseStatus = "Timeout"
             isAnimating = false
             dotCount = 0
@@ -686,8 +758,12 @@ final class HudOverlayController: NSObject {
             appendConversationLine("System: No speech detected")
             debugLog("hud: timeout")
             updateStatusUI()
+            if closeRequested {
+                requestClose()
+            }
         case "error":
             sawTerminalMessage = true
+            extendVisibility(ms: postTerminalHoldMs)
             baseStatus = "Error"
             isAnimating = false
             dotCount = 0
@@ -698,6 +774,9 @@ final class HudOverlayController: NSObject {
             appendConversationLine(text.isEmpty ? "System: ASR error" : "System: \(text)")
             debugLog("hud: error text=\(String(text.prefix(120)))")
             updateStatusUI()
+            if closeRequested {
+                requestClose()
+            }
         case "close":
             debugLog("hud: close requested")
             requestClose()
@@ -743,12 +822,11 @@ final class HudOverlayController: NSObject {
         statusLabel?.stringValue = isAnimating ? "\(baseStatus)\(dots)" : baseStatus
     }
 
-    private func requestClose() {
-        guard !closeRequested else { return }
+    private func requestClose(extraHoldMs: Int = 0) {
         closeRequested = true
-        // ASK session ended. Close HUD immediately to avoid stale floating windows
-        // and prevent overlap across concurrent sessions.
-        terminateApp()
+        let extraUntil = Date().addingTimeInterval(Double(max(0, extraHoldMs)) / 1000.0)
+        let holdUntil = max(minVisibleUntil ?? Date(), extraUntil)
+        scheduleClose(at: holdUntil)
     }
 
     private func terminateApp() {

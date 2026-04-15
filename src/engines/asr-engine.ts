@@ -28,6 +28,8 @@ const ASK_GATE_QUIET_FACTOR = 0.75;
 const ASK_TTS_START_GATE_TIMEOUT_MS = 1_500;
 const ASK_TTS_START_ANTIBLEED_MS = 260;
 const ASK_PROMPT_ECHO_RETRY_MAX = 2;
+const ASK_RECOVERABLE_ERROR_RETRY_MAX = 3;
+const ASK_RECOVERABLE_ERROR_BACKOFF_MS = 180;
 const ECHO_ONLY_RMS_RATIO_MAX = 0.72;
 const ECHO_DOUBLE_TALK_RMS_FACTOR = 1.22;
 const ASK_LOCK_DIR = path.join(os.tmpdir(), 'echocoding-ask.lock');
@@ -106,6 +108,10 @@ interface ListenOptions {
   startGate?: ListenStartGate;
   skipReadyCue?: boolean;
   askSession?: boolean;
+}
+
+interface AskOptions {
+  forceCloseHud?: boolean;
 }
 
 interface AsrHudController {
@@ -351,6 +357,35 @@ function isLikelyPromptEcho(recognizedText: string, promptText: string): boolean
   const recognizedRatio = overlap / recognized.length;
   const promptRatio = overlap / prompt.length;
   return recognizedRatio >= 0.9 && promptRatio >= 0.5;
+}
+
+function isRecoverableAskError(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  if (!msg) return false;
+
+  // Fatal conditions should surface immediately.
+  if (
+    msg.includes('permission denied') ||
+    msg.includes('not configured') ||
+    msg.includes('is busy') ||
+    msg.includes('another session') ||
+    msg.includes('not yet supported')
+  ) {
+    return false;
+  }
+
+  return (
+    msg.includes('timeout') ||
+    msg.includes('temporar') ||
+    msg.includes('websocket') ||
+    msg.includes('socket') ||
+    msg.includes('stream') ||
+    msg.includes('connection') ||
+    msg.includes('upstream') ||
+    msg.includes('network') ||
+    msg.includes('econn') ||
+    msg.includes('broken pipe')
+  );
 }
 
 function isProcessRunning(pid: number): boolean {
@@ -765,14 +800,18 @@ export async function listen(timeoutSec?: number, options: ListenOptions = {}): 
  * Speak a question via TTS, then listen for the answer.
  * Returns the recognized text.
  */
-export async function ask(question: string, timeoutSec?: number): Promise<string> {
+export async function ask(
+  question: string,
+  timeoutSec?: number,
+  options: AskOptions = {},
+): Promise<string> {
   // Import speak dynamically to avoid circular deps
   const { speak } = await import('./voice-engine.js');
   const effectiveTimeout = Math.max(1, Math.floor(timeoutSec ?? DEFAULT_ASK_TIMEOUT_SEC));
   const hudEnabled = os.platform() === 'darwin';
   const prompt = question.trim();
   const releaseAskLock = await acquireAskLock();
-  let forceCloseHud = false;
+  const forceCloseHud = options.forceCloseHud === true;
 
   try {
     const hud = await acquireAskHud(hudEnabled);
@@ -815,6 +854,7 @@ export async function ask(question: string, timeoutSec?: number): Promise<string
       let result = '[timeout]';
       let useStartGate = true;
       let echoRetryCount = 0;
+      let recoverableErrorCount = 0;
       while (true) {
         const remainingMs = askDeadlineAt - Date.now();
         if (remainingMs <= 900) {
@@ -822,30 +862,51 @@ export async function ask(question: string, timeoutSec?: number): Promise<string
           break;
         }
 
-        const listenPromise = listenWithHud(
-          Math.max(1, Math.ceil(remainingMs / 1000)),
-          {
-            hud: hudEnabled,
-            skipReadyCue: true,
-            askSession: hudEnabled && supportsSharedAskHud(),
-            startGate: useStartGate ? {
-              ready: startGateReady,
-              antiBleedMs: ASK_TTS_START_ANTIBLEED_MS,
-            } : undefined,
-            // Ask mode: if there is no clear response, keep channel open up to timeout.
-            vadOverrides: {
-              // Favor responsiveness during interactive ask.
-              silenceMs: 800,
-              minSpeechMs: 350,
-              noSpeechTimeoutMs: remainingMs,
-              maxDurationMs: remainingMs,
+        let attemptResult: string;
+        try {
+          const listenPromise = listenWithHud(
+            Math.max(1, Math.ceil(remainingMs / 1000)),
+            {
+              hud: hudEnabled,
+              skipReadyCue: true,
+              askSession: hudEnabled && supportsSharedAskHud(),
+              startGate: useStartGate ? {
+                ready: startGateReady,
+                antiBleedMs: ASK_TTS_START_ANTIBLEED_MS,
+              } : undefined,
+              // Ask mode: if there is no clear response, keep channel open up to timeout.
+              vadOverrides: {
+                // Favor responsiveness during interactive ask.
+                silenceMs: 800,
+                minSpeechMs: 350,
+                noSpeechTimeoutMs: remainingMs,
+                maxDurationMs: remainingMs,
+              },
             },
-          },
-          hud,
-        );
-        // Keep rejection handling attached while TTS is still playing.
-        listenPromise.catch(() => { /* handled below */ });
-        let attemptResult = await listenPromise;
+            hud,
+          );
+          // Keep rejection handling attached while TTS is still playing.
+          listenPromise.catch(() => { /* handled below */ });
+          attemptResult = await listenPromise;
+        } catch (attemptErr) {
+          const remainingAfterErrorMs = askDeadlineAt - Date.now();
+          const canRetry = (
+            isRecoverableAskError(attemptErr) &&
+            recoverableErrorCount < ASK_RECOVERABLE_ERROR_RETRY_MAX &&
+            remainingAfterErrorMs > 1_200
+          );
+          if (!canRetry) {
+            throw attemptErr;
+          }
+          recoverableErrorCount += 1;
+          hud.updateStatus('Reconnecting', true);
+          hud.updatePartial('');
+          useStartGate = false;
+          await delayMs(Math.min(ASK_RECOVERABLE_ERROR_BACKOFF_MS * recoverableErrorCount, 420));
+          continue;
+        }
+
+        recoverableErrorCount = 0;
         if (attemptResult === '[empty]') {
           attemptResult = '[timeout]';
         }
@@ -867,16 +928,12 @@ export async function ask(question: string, timeoutSec?: number): Promise<string
       }
 
       void speakTask;
-      // Always close HUD after each ask — model decides whether to call ask again.
-      // This keeps the contract clean: HUD visible = model is actively asking.
-      forceCloseHud = true;
       clearTimeout(startGateTimeout);
       openStartGate();
       return result;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       hud.error(message || 'ASK failed');
-      forceCloseHud = true;
       throw err;
     } finally {
       clearTimeout(startGateTimeout);
