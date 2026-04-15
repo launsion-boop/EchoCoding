@@ -65,11 +65,11 @@ Voice mode shortens **narration** (preamble, transitions, filler), NOT content (
 - Unclear → ask more specifically or fall back to text
 
 **ASK Session Protocol (voice dialog):**
-- Each `ask` call is self-contained: HUD opens → TTS question → ASR listens → result returned → HUD closes.
-- **Model drives multi-turn:** if the answer is ambiguous or incomplete, immediately call `ask` again with a focused follow-up question.
-- Ask one intent at a time (short sentence), then wait for user speech.
-- Assume ASR may be noisy. For key confirmations, restate and confirm again: `ask "你是说要删除整个目录吗？请确认"`.
-- Continue issuing `ask` calls until requirements are clear, then proceed with execution.
+- `ask` returns result → **HUD stays open** (showing what was heard).
+- **Got a satisfactory answer:** call `ask-end` → HUD closes → proceed. If you forget, HUD auto-closes after 60s.
+- **Answer unclear/incomplete:** call `ask` again with a follow-up. HUD re-opens.
+- Ask one intent at a time. Assume ASR may be noisy — for key confirmations, restate: `ask "你是说要删除整个目录吗？请确认"`.
+- Timeout/error → HUD closes automatically, no ask-end needed.
 
 **Timeout:** default inactivity timeout is 60 seconds. Never proceed with irreversible actions without confirmation.
 

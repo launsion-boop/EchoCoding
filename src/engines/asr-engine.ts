@@ -979,9 +979,7 @@ export async function ask(
   const hudEnabled = os.platform() === 'darwin';
   const prompt = question.trim();
   const releaseAskLock = await acquireAskLock();
-  // Default: close HUD immediately after result — model doesn't need to remember ask-end.
-  // Pass forceCloseHud: false to keep the 60s idle window instead (e.g. for UI previews).
-  const forceCloseHud = options.forceCloseHud !== false;
+  let shouldForceCloseHud = false; // resolved after result (see below)
 
   try {
     const hud = await acquireAskHud(hudEnabled);
@@ -1119,13 +1117,22 @@ export async function ask(
       }
 
       void speakTask;
+      // Close policy:
+      // - [timeout] / [error] → force close immediately (unambiguous terminal)
+      // - valid result → keep HUD open; model calls ask-end when done; 60s fallback
+      // Explicit forceCloseHud option overrides both.
+      const isTerminal = result === '[timeout]' || result === '[error]';
+      shouldForceCloseHud = options.forceCloseHud !== undefined
+        ? options.forceCloseHud
+        : isTerminal;
       return result;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       hud.error(message || 'ASK failed');
+      shouldForceCloseHud = true;
       throw err;
     } finally {
-      await releaseAskHud(hud, hudEnabled, { forceClose: forceCloseHud });
+      await releaseAskHud(hud, hudEnabled, { forceClose: shouldForceCloseHud });
     }
   } catch (err) {
     throw err;
