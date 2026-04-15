@@ -17,6 +17,11 @@ import { createRequire } from 'node:module';
 
 const _require = createRequire(import.meta.url);
 
+// Studio always writes global config — unset client env vars so saveConfig
+// doesn't scope voiceLevel/mode/enabled into a per-client override.
+delete process.env.ECHOCODING_CLIENT;
+delete process.env.ECHOCODING_HOOK_CLIENT;
+
 const TEMP_DIR = path.join(os.tmpdir(), 'echocoding-studio');
 const STUDIO_PREVIEW_TEXT = {
   zh: '你好，我是你的编程助手，很高兴认识你',
