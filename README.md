@@ -37,11 +37,30 @@ echocoding install --auto --start
 
 That's it. No models to download, no API keys to configure.
 
-- **Claude Code**: type `/echocoding` to activate voice mode
-- **Cursor / Windsurf**: MCP tools are available automatically
+- **Cursor / Windsurf**: MCP tools are available automatically after install
 - Run `echocoding doctor` to verify your setup
 
 After install, EchoCoding starts automatically with every new session. Sound effects play from the first keystroke.
+
+### Claude Code — Activating Voice Mode
+
+Sound effects are on from the moment you install. To unlock TTS speech and voice Q&A, type `/echocoding` at the start of your session:
+
+```
+/echocoding
+```
+
+This activates **balanced mode** — the default. Your agent will speak at key moments and listen for your voice responses.
+
+**Three voice levels:**
+
+| Level | Agent Speech | Voice Q&A | Best For |
+|-------|-------------|-----------|----------|
+| `/echocoding minimal` | None | Yes | Focus — SFX only, zero interruptions |
+| `/echocoding` (default) | Key moments | Yes | Daily use — speaks when it matters |
+| `/echocoding verbose` | Every turn | Yes | Hands-free — full narration |
+
+You can switch levels at any time during a session. Without `/echocoding`, the agent stays in SFX-only mode.
 
 ## Three Layers of Audio
 
@@ -310,11 +329,30 @@ echocoding install --auto --start
 
 不需要下载模型，不需要 API Key。
 
-- **Claude Code**：输入 `/echocoding` 激活语音模式
 - **Cursor / Windsurf**：安装后 MCP 工具自动可用
 - 运行 `echocoding doctor` 确认环境正常
 
-安装后，daemon 会随 Claude Code 自动启动。音效从第一次操作开始就有。
+安装后，daemon 会随每次新会话自动启动。音效从第一次操作开始就有。
+
+### Claude Code — 开启语音模式
+
+安装即有音效。要解锁 TTS 语音播报和语音问答，在每次会话开始时输入：
+
+```
+/echocoding
+```
+
+这会激活**平衡模式**（默认）。AI 在关键节点开口说话，并能听你的语音回答。
+
+**三种语音档位：**
+
+| 档位 | AI 说话 | 语音问答 | 适合场景 |
+|------|---------|---------|---------|
+| `/echocoding minimal` | 无 | 有 | 专注模式，纯音效不打扰 |
+| `/echocoding`（默认） | 关键时刻 | 有 | 日常协作，该说才说 |
+| `/echocoding verbose` | 每一步 | 有 | 解放双手，全程播报 |
+
+会话中随时切换档位。不输入 `/echocoding` 则保持纯音效模式。
 
 ## 三层音频体验
 
