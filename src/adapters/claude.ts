@@ -105,6 +105,16 @@ function getVoiceReminderCommand(): string {
   return `ECHOCODING_HOOK_CLIENT=claude ECHOCODING_CLIENT=claude bash ${script}`;
 }
 
+function getVoiceAskNudgeCommand(): string {
+  const script = path.join(getPackageRoot(), 'scripts', 'voice-ask-nudge.sh');
+  return `ECHOCODING_HOOK_CLIENT=claude bash ${script}`;
+}
+
+function getVoiceAutoModeCommand(): string {
+  const script = path.join(getPackageRoot(), 'scripts', 'voice-auto-mode.sh');
+  return `ECHOCODING_HOOK_CLIENT=claude bash ${script}`;
+}
+
 function getAutoStartCommand(): string {
   const script = path.join(getPackageRoot(), 'scripts', 'auto-start.sh');
   const nodePath = process.execPath;
@@ -167,7 +177,7 @@ export const claudeAdapter: ClientAdapter = {
     // Inject EchoCoding hooks (preserve unrelated hooks, upsert managed hooks)
     let injected = 0;
     for (const [eventName, config] of Object.entries(HOOK_CONFIG)) {
-      if (eventName === 'SessionStart' || eventName === 'UserPromptSubmit') continue;
+      if (eventName === 'SessionStart' || eventName === 'UserPromptSubmit' || eventName === 'Stop') continue;
       if (upsertClaudeManagedGroup(settings.hooks, eventName, ['echocoding-hook'], {
         matcher: '',
         hooks: [
@@ -182,10 +192,15 @@ export const claudeAdapter: ClientAdapter = {
       }
     }
 
-    // SessionStart: keep auto-start + hook in one group.
-    if (upsertClaudeManagedGroup(settings.hooks, 'SessionStart', ['echocoding-hook', 'auto-start'], {
+    // SessionStart: voice-auto-mode (blocking) + auto-start + hook.
+    if (upsertClaudeManagedGroup(settings.hooks, 'SessionStart', ['echocoding-hook', 'auto-start', 'voice-auto-mode'], {
       matcher: '',
       hooks: [
+        {
+          type: 'command',
+          command: getVoiceAutoModeCommand(),
+          // blocking (no async) — stdout injected as session-start context
+        },
         {
           type: 'command',
           command: getAutoStartCommand(),
@@ -209,6 +224,25 @@ export const claudeAdapter: ClientAdapter = {
           type: 'command',
           command: getVoiceReminderCommand(),
           // blocking (no async) — stdout is injected as system message
+        },
+        {
+          type: 'command',
+          command: getHookCommand(),
+          async: true,
+        },
+      ],
+    })) {
+      injected++;
+    }
+
+    // Stop: voice-ask-nudge (blocking) + hook.
+    if (upsertClaudeManagedGroup(settings.hooks, 'Stop', ['echocoding-hook', 'voice-ask-nudge'], {
+      matcher: '',
+      hooks: [
+        {
+          type: 'command',
+          command: getVoiceAskNudgeCommand(),
+          // blocking (no async) — stdout injected as stop-hook context
         },
         {
           type: 'command',
@@ -265,6 +299,8 @@ export const claudeAdapter: ClientAdapter = {
             (h) =>
               !h.command.includes('echocoding-hook') &&
               !h.command.includes('voice-reminder') &&
+              !h.command.includes('voice-ask-nudge') &&
+              !h.command.includes('voice-auto-mode') &&
               !h.command.includes('auto-start'),
           ),
         }))

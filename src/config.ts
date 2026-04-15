@@ -30,6 +30,7 @@ export interface EchoConfig {
   volume: number;
   mode: 'full' | 'sfx-only' | 'voice-only' | 'focus' | 'mute';
   voiceLevel: VoiceLevel;
+  autoVoiceMode: boolean; // if true, balanced voice mode activates automatically each session
   tts: {
     enabled: boolean;
     provider: TtsProvider;
@@ -140,6 +141,7 @@ function createDefaultConfig(env: NodeJS.ProcessEnv = process.env): EchoConfig {
     volume: 70,
     mode: 'full',
     voiceLevel: 'balanced',
+    autoVoiceMode: false,
     tts: {
       enabled: true,
       provider: 'cloud',
