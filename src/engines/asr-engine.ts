@@ -19,6 +19,15 @@ const PROXY_STREAM_FINAL_WAIT_MS = 20_000;
 const MAX_UNIX_SOCKET_PATH_LENGTH = 100;
 const DEFAULT_ASK_TIMEOUT_SEC = 60;
 const ASK_HUD_IDLE_CLOSE_MS = 60_000;
+const ASK_TTS_ANTI_BLEED_MS = 80;
+const ASK_GATE_QUIET_MS = 100;
+const ASK_GATE_MAX_WAIT_MS = 280;
+const ASK_GATE_QUIET_FACTOR = 0.75;
+const ASK_LOCK_DIR = path.join(os.tmpdir(), 'echocoding-ask.lock');
+const ASK_LOCK_OWNER_FILE = path.join(ASK_LOCK_DIR, 'owner.json');
+const ASK_LOCK_STALE_MS = 180_000;
+const ASK_LOCK_WAIT_MS = 180_000;
+const ASK_LOCK_POLL_MS = 120;
 
 type VadInputConfig = ReturnType<typeof getConfig>['asr']['vad'];
 
@@ -45,10 +54,17 @@ interface CloudAudioSender {
   abort: () => void;
 }
 
+interface ListenStartGate {
+  ready: Promise<void>;
+  antiBleedMs?: number;
+}
+
 interface ListenOptions {
   hud?: boolean;
   hudPrompt?: string;
   vadOverrides?: Partial<VadInputConfig>;
+  startGate?: ListenStartGate;
+  skipReadyCue?: boolean;
 }
 
 interface AsrHudController {
@@ -175,6 +191,10 @@ let sharedAskHud: AsrHudController | null = null;
 let sharedAskHudUsers = 0;
 let sharedAskHudCloseTimer: NodeJS.Timeout | null = null;
 
+function supportsSharedAskHud(): boolean {
+  return process.argv.some((arg) => arg.includes('echocoding-daemon.js'));
+}
+
 function createNoopHudController(): AsrHudController {
   return {
     reset: () => { /* noop */ },
@@ -186,6 +206,99 @@ function createNoopHudController(): AsrHudController {
     error: () => { /* noop */ },
     close: async () => { /* noop */ },
   };
+}
+
+function createDeferred<T = void>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+function delayMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isProcessRunning(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 1) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function clearStaleAskLock(): void {
+  if (!fs.existsSync(ASK_LOCK_DIR)) return;
+  let shouldRemove = false;
+
+  try {
+    const stat = fs.statSync(ASK_LOCK_DIR);
+    if ((Date.now() - stat.mtimeMs) > ASK_LOCK_STALE_MS) {
+      shouldRemove = true;
+    }
+  } catch {
+    shouldRemove = true;
+  }
+
+  if (!shouldRemove) {
+    try {
+      const owner = JSON.parse(fs.readFileSync(ASK_LOCK_OWNER_FILE, 'utf-8')) as { pid?: number };
+      if (owner?.pid && !isProcessRunning(owner.pid)) {
+        shouldRemove = true;
+      }
+    } catch {
+      // Owner metadata missing or unreadable; fallback to mtime only.
+    }
+  }
+
+  if (!shouldRemove) return;
+  try {
+    fs.rmSync(ASK_LOCK_DIR, { recursive: true, force: true });
+  } catch {
+    // ignore
+  }
+}
+
+async function acquireAskLock(): Promise<() => void> {
+  const deadline = Date.now() + ASK_LOCK_WAIT_MS;
+
+  while (Date.now() < deadline) {
+    try {
+      fs.mkdirSync(ASK_LOCK_DIR);
+      try {
+        fs.writeFileSync(
+          ASK_LOCK_OWNER_FILE,
+          JSON.stringify({ pid: process.pid, startedAt: Date.now() }),
+          'utf-8',
+        );
+      } catch {
+        // ignore metadata write errors
+      }
+
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        try { fs.rmSync(ASK_LOCK_DIR, { recursive: true, force: true }); } catch { /* ignore */ }
+      };
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'EEXIST') throw err;
+      clearStaleAskLock();
+      await delayMs(ASK_LOCK_POLL_MS);
+    }
+  }
+
+  throw new Error('ASK is busy: another session is using the microphone.');
 }
 
 async function createHudController(enabled: boolean): Promise<AsrHudController> {
@@ -294,6 +407,9 @@ async function acquireAskHud(enabled: boolean): Promise<AsrHudController> {
   if (!enabled || os.platform() !== 'darwin') {
     return createNoopHudController();
   }
+  if (!supportsSharedAskHud()) {
+    return createHudController(true);
+  }
   if (sharedAskHudCloseTimer) {
     clearTimeout(sharedAskHudCloseTimer);
     sharedAskHudCloseTimer = null;
@@ -305,9 +421,21 @@ async function acquireAskHud(enabled: boolean): Promise<AsrHudController> {
   return sharedAskHud;
 }
 
-async function releaseAskHud(hud: AsrHudController, enabled: boolean): Promise<void> {
+async function releaseAskHud(
+  hud: AsrHudController,
+  enabled: boolean,
+  options: { forceClose?: boolean } = {},
+): Promise<void> {
   if (!enabled || os.platform() !== 'darwin') {
     await hud.close();
+    return;
+  }
+  if (!supportsSharedAskHud()) {
+    await hud.close();
+    return;
+  }
+  if (options.forceClose) {
+    closeSharedAskHudNow();
     return;
   }
   if (hud !== sharedAskHud) {
@@ -375,42 +503,63 @@ export async function ask(question: string, timeoutSec?: number): Promise<string
   const { speak } = await import('./voice-engine.js');
   const effectiveTimeout = Math.max(1, Math.floor(timeoutSec ?? DEFAULT_ASK_TIMEOUT_SEC));
   const hudEnabled = os.platform() === 'darwin';
-  const hud = await acquireAskHud(hudEnabled);
   const prompt = question.trim();
+  const releaseAskLock = await acquireAskLock();
+  let forceCloseHud = false;
 
   try {
-    hud.reset();
-    if (prompt) {
-      hud.updatePrompt(prompt);
-    }
-    hud.updateStatus('Assistant speaking', true);
-    await speak(question);
-
-    // Small gap after TTS before opening mic.
-    await new Promise((r) => setTimeout(r, 350));
-
-    return await listenWithHud(
-      effectiveTimeout,
-      {
-        hud: hudEnabled,
-        hudPrompt: prompt,
-        // Ask mode: if there is no clear response, keep channel open up to 60s.
-        vadOverrides: {
-          // Favor responsiveness during interactive ask.
-          silenceMs: 800,
-          minSpeechMs: 350,
-          noSpeechTimeoutMs: effectiveTimeout * 1000,
-          maxDurationMs: effectiveTimeout * 1000,
+    const hud = await acquireAskHud(hudEnabled);
+    try {
+      hud.reset();
+      if (prompt) {
+        hud.updatePrompt(prompt);
+      }
+      const startGate = createDeferred<void>();
+      const listenPromise = listenWithHud(
+        effectiveTimeout,
+        {
+          hud: hudEnabled,
+          hudPrompt: prompt,
+          startGate: {
+            ready: startGate.promise,
+            antiBleedMs: ASK_TTS_ANTI_BLEED_MS,
+          },
+          skipReadyCue: true,
+          // Ask mode: if there is no clear response, keep channel open up to 60s.
+          vadOverrides: {
+            // Favor responsiveness during interactive ask.
+            silenceMs: 800,
+            minSpeechMs: 350,
+            noSpeechTimeoutMs: effectiveTimeout * 1000,
+            maxDurationMs: effectiveTimeout * 1000,
+          },
         },
-      },
-      hud,
-    );
+        hud,
+      );
+      // Keep rejection handling attached while TTS is still playing.
+      listenPromise.catch(() => { /* handled below */ });
+
+      hud.updateStatus('Assistant speaking', true);
+      // Open mic immediately so user can barge-in before TTS fully ends.
+      startGate.resolve();
+      const speakTask = speak(question).catch(() => { /* ignore TTS failure in ask flow */ });
+
+      const result = await listenPromise;
+      void speakTask;
+      forceCloseHud = true;
+      return result;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      hud.error(message || 'ASK failed');
+      forceCloseHud = true;
+      throw err;
+    } finally {
+      await releaseAskHud(hud, hudEnabled, { forceClose: forceCloseHud });
+    }
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    hud.error(message || 'ASK failed');
     throw err;
   } finally {
-    await releaseAskHud(hud, hudEnabled);
+    releaseAskLock();
   }
 }
 
@@ -420,7 +569,9 @@ async function listenWithHud(
   hud: AsrHudController,
 ): Promise<string> {
   const config = getConfig();
-  hud.updateStatus('Preparing', true);
+  if (!options.startGate) {
+    hud.updateStatus('Preparing', true);
+  }
   if (options.hudPrompt) {
     hud.updatePrompt(options.hudPrompt);
   }
@@ -432,9 +583,9 @@ async function listenWithHud(
 
   let result: string;
   if (config.asr.provider === 'cloud') {
-    result = await listenCloud(timeoutSec, hud, options.vadOverrides);
+    result = await listenCloud(timeoutSec, hud, options);
   } else {
-    result = await listenLocal(timeoutSec, hud, options.vadOverrides);
+    result = await listenLocal(timeoutSec, hud, options);
   }
 
   if (result === '[timeout]') hud.timeout();
@@ -452,18 +603,20 @@ async function listenWithHud(
 async function listenLocal(
   timeoutSec: number,
   hud: AsrHudController,
-  vadOverrides?: Partial<VadInputConfig>,
+  options: ListenOptions = {},
 ): Promise<string> {
-  // Play mic-ready beep (walkie-talkie style)
-  playSfx('mic-ready');
-  hud.updateStatus('Listening', true);
-  await new Promise((r) => setTimeout(r, 300));
+  if (!options.skipReadyCue) {
+    // Play mic-ready beep (walkie-talkie style)
+    playSfx('mic-ready');
+    hud.updateStatus('Listening', true);
+    await new Promise((r) => setTimeout(r, 300));
+  }
 
   // Step 1: Record speech with local VAD (fallback to fixed recording if streaming capture fails).
   const config = getConfig();
   let audioFile: string | null = null;
   try {
-    audioFile = await recordSpeechWithVad(timeoutSec, config.asr.vad, hud, vadOverrides);
+    audioFile = await recordSpeechWithVad(timeoutSec, config.asr.vad, hud, options.vadOverrides, options.startGate);
   } catch {
     audioFile = await recordMicrophone(timeoutSec);
   }
@@ -898,7 +1051,7 @@ function recognizeFile(wavFile: string): string {
 async function listenCloud(
   timeoutSec: number,
   hud: AsrHudController,
-  vadOverrides?: Partial<VadInputConfig>,
+  options: ListenOptions = {},
 ): Promise<string> {
   const config = getConfig();
   const { endpoint, apiKey } = config.asr.cloud;
@@ -908,24 +1061,26 @@ async function listenCloud(
   }
 
   // Record audio with heartbeat indicator
-  playSfx('mic-ready');
-  hud.updateStatus('Listening', true);
-  await new Promise((r) => setTimeout(r, 300));
+  if (!options.skipReadyCue) {
+    playSfx('mic-ready');
+    hud.updateStatus('Listening', true);
+    await new Promise((r) => setTimeout(r, 300));
+  }
 
   // Play fast heartbeat while mic is open/listening.
   const heartbeatInterval = setInterval(() => playSfx('heartbeat'), 1200);
   try {
     const isVolcDirect = endpoint.includes('openspeech.bytedance.com');
     if (isVolcDirect) {
-      return await listenCloudBatch(timeoutSec, endpoint, apiKey, config, hud, vadOverrides);
+      return await listenCloudBatch(timeoutSec, endpoint, apiKey, config, hud, options.vadOverrides, options.startGate);
     }
 
     try {
-      return await listenCloudProxyStream(timeoutSec, endpoint, config.asr.vad, hud, vadOverrides);
+      return await listenCloudProxyStream(timeoutSec, endpoint, config.asr.vad, hud, options.vadOverrides, options.startGate);
     } catch (err) {
       // Graceful downgrade for older proxy versions without /v1/asr/stream.
       if (!shouldFallbackToBatch(err)) throw err;
-      return await listenCloudBatch(timeoutSec, endpoint, apiKey, config, hud, vadOverrides);
+      return await listenCloudBatch(timeoutSec, endpoint, apiKey, config, hud, options.vadOverrides, options.startGate);
     }
   } finally {
     clearInterval(heartbeatInterval);
@@ -939,10 +1094,11 @@ async function listenCloudBatch(
   config: ReturnType<typeof getConfig>,
   hud: AsrHudController,
   vadOverrides?: Partial<VadInputConfig>,
+  startGate?: ListenStartGate,
 ): Promise<string> {
   let audioFile: string | null = null;
   try {
-    audioFile = await recordSpeechWithVad(timeoutSec, config.asr.vad, hud, vadOverrides);
+    audioFile = await recordSpeechWithVad(timeoutSec, config.asr.vad, hud, vadOverrides, startGate);
   } catch {
     // Keep compatibility when streaming mic capture is unavailable.
     audioFile = await recordMicrophone(timeoutSec);
@@ -977,11 +1133,16 @@ async function recordSpeechWithVad(
   vadInput: VadInputConfig,
   hud: AsrHudController,
   vadOverrides?: Partial<VadInputConfig>,
+  startGate?: ListenStartGate,
 ): Promise<string | null> {
   const vadConfig = getVadRuntimeConfig(timeoutSec, vadInput, vadOverrides);
   const maxSourceSec = Math.ceil(vadConfig.maxDurationMs / 1000) + 1;
   const preRollLimitBytes = Math.max(0, Math.floor((vadConfig.preRollMs / 1000) * PCM_BYTES_PER_SECOND));
-  const startedAt = Date.now();
+  const gateDelayMs = Math.max(0, Math.floor(startGate?.antiBleedMs ?? 0));
+  let gateEligibleAt: number | null = startGate ? null : Date.now();
+  let activatedAt: number | null = startGate ? null : Date.now();
+  let gateActivated = !startGate;
+  let quietMs = 0;
 
   let speechCommitted = false;
   let candidateActive = false;
@@ -1005,6 +1166,18 @@ async function recordSpeechWithVad(
     settleResolve = resolve;
     settleReject = reject;
   });
+
+  if (startGate) {
+    startGate.ready.then(() => {
+      if (finished) return;
+      gateEligibleAt = Date.now() + gateDelayMs;
+      hud.updateStatus('Listening', true);
+    }).catch(() => {
+      if (finished) return;
+      gateEligibleAt = Date.now();
+      hud.updateStatus('Listening', true);
+    });
+  }
 
   const appendSpeechChunk = (chunk: Buffer) => {
     speechBuffers.push(chunk);
@@ -1048,6 +1221,24 @@ async function recordSpeechWithVad(
     if (finished) return;
 
     const now = Date.now();
+    if (!gateActivated) {
+      if (gateEligibleAt === null || now < gateEligibleAt) return;
+      const gateRms = computeRms(chunk);
+      const gateChunkMs = pcmBytesToMs(chunk.length);
+      const quietThreshold = vadConfig.rmsThreshold * ASK_GATE_QUIET_FACTOR;
+      quietMs = gateRms < quietThreshold ? (quietMs + gateChunkMs) : 0;
+      if (quietMs < ASK_GATE_QUIET_MS && (now - gateEligibleAt) < ASK_GATE_MAX_WAIT_MS) return;
+      gateActivated = true;
+      activatedAt = now;
+      quietMs = 0;
+      candidateActive = false;
+      candidateVoicedMs = 0;
+      candidateLastVoiceAt = 0;
+      preRollBuffers.length = 0;
+      preRollBytes = 0;
+      candidateBuffers.length = 0;
+      return;
+    }
     const voiced = computeRms(chunk) >= vadConfig.rmsThreshold;
     const chunkMs = pcmBytesToMs(chunk.length);
 
@@ -1109,7 +1300,8 @@ async function recordSpeechWithVad(
   ticker = setInterval(() => {
     if (finished) return;
     const now = Date.now();
-    const elapsed = now - startedAt;
+    if (!gateActivated || activatedAt === null || now < activatedAt) return;
+    const elapsed = now - activatedAt;
 
     if (!speechCommitted && elapsed >= vadConfig.noSpeechTimeoutMs) {
       hud.updateStatus('No speech detected', false);
@@ -1298,6 +1490,7 @@ async function listenCloudProxyStream(
   vadInput: VadInputConfig,
   hud: AsrHudController,
   vadOverrides?: Partial<VadInputConfig>,
+  startGate?: ListenStartGate,
 ): Promise<string> {
   const vadConfig = getVadRuntimeConfig(timeoutSec, vadInput, vadOverrides);
   const ws = await openProxyAsrStream(endpoint);
@@ -1314,7 +1507,11 @@ async function listenCloudProxyStream(
     }
   });
 
-  const startedAt = Date.now();
+  const gateDelayMs = Math.max(0, Math.floor(startGate?.antiBleedMs ?? 0));
+  let gateEligibleAt: number | null = startGate ? null : Date.now();
+  let activatedAt: number | null = startGate ? null : Date.now();
+  let gateActivated = !startGate;
+  let quietMs = 0;
   const preRollLimitBytes = Math.max(0, Math.floor((vadConfig.preRollMs / 1000) * PCM_BYTES_PER_SECOND));
   const maxSourceSec = Math.ceil(vadConfig.maxDurationMs / 1000) + 1;
 
@@ -1338,6 +1535,18 @@ async function listenCloudProxyStream(
     settleResolve = resolve;
     settleReject = reject;
   });
+
+  if (startGate) {
+    startGate.ready.then(() => {
+      if (finished) return;
+      gateEligibleAt = Date.now() + gateDelayMs;
+      hud.updateStatus('Listening', true);
+    }).catch(() => {
+      if (finished) return;
+      gateEligibleAt = Date.now();
+      hud.updateStatus('Listening', true);
+    });
+  }
 
   const cleanup = () => {
     if (ticker) {
@@ -1421,6 +1630,24 @@ async function listenCloudProxyStream(
     if (finished) return;
 
     const now = Date.now();
+    if (!gateActivated) {
+      if (gateEligibleAt === null || now < gateEligibleAt) return;
+      const gateRms = computeRms(chunk);
+      const gateChunkMs = pcmBytesToMs(chunk.length);
+      const quietThreshold = vadConfig.rmsThreshold * ASK_GATE_QUIET_FACTOR;
+      quietMs = gateRms < quietThreshold ? (quietMs + gateChunkMs) : 0;
+      if (quietMs < ASK_GATE_QUIET_MS && (now - gateEligibleAt) < ASK_GATE_MAX_WAIT_MS) return;
+      gateActivated = true;
+      activatedAt = now;
+      quietMs = 0;
+      candidateActive = false;
+      candidateVoicedMs = 0;
+      candidateLastVoiceAt = 0;
+      preRollBuffers.length = 0;
+      preRollBytes = 0;
+      candidateBuffers.length = 0;
+      return;
+    }
     const voiced = computeRms(chunk) >= vadConfig.rmsThreshold;
     const chunkMs = pcmBytesToMs(chunk.length);
 
@@ -1484,7 +1711,8 @@ async function listenCloudProxyStream(
   ticker = setInterval(() => {
     if (finished) return;
     const now = Date.now();
-    const elapsed = now - startedAt;
+    if (!gateActivated || activatedAt === null || now < activatedAt) return;
+    const elapsed = now - activatedAt;
 
     if (!speechCommitted && elapsed >= vadConfig.noSpeechTimeoutMs) {
       hud.updateStatus('No speech detected', false);

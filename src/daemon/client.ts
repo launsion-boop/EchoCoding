@@ -70,10 +70,15 @@ export function sendWithResponse(msg: DaemonMessage, timeoutMs = 30_000): Promis
     const { socketPath } = resolveDaemonPaths(config.daemon);
     let settled = false;
     let responseBuffer = '';
+    const timeout = setTimeout(() => {
+      client.destroy();
+      done('[timeout]');
+    }, timeoutMs);
 
     const done = (result: string) => {
       if (!settled) {
         settled = true;
+        clearTimeout(timeout);
         resolve(result);
       }
     };
@@ -81,6 +86,7 @@ export function sendWithResponse(msg: DaemonMessage, timeoutMs = 30_000): Promis
     const fail = (err: string) => {
       if (!settled) {
         settled = true;
+        clearTimeout(timeout);
         reject(new Error(err));
       }
     };
@@ -92,8 +98,10 @@ export function sendWithResponse(msg: DaemonMessage, timeoutMs = 30_000): Promis
 
     client.on('data', (chunk) => {
       responseBuffer += chunk.toString();
-      // Try to parse response
-      for (const line of responseBuffer.split('\n')) {
+      const lines = responseBuffer.split('\n');
+      responseBuffer = lines.pop() ?? '';
+      // Parse complete lines only
+      for (const line of lines) {
         if (!line.trim()) continue;
         try {
           const parsed = JSON.parse(line) as { result?: string };
@@ -117,12 +125,6 @@ export function sendWithResponse(msg: DaemonMessage, timeoutMs = 30_000): Promis
         fail('Daemon closed connection');
       }
     });
-
-    // Timeout
-    setTimeout(() => {
-      client.destroy();
-      done('[timeout]');
-    }, timeoutMs);
   });
 }
 

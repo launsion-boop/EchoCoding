@@ -98,6 +98,14 @@ class Recorder: NSObject {
 
         let input = engine.inputNode
         let hwFormat = input.outputFormat(forBus: 0)
+        if #available(macOS 10.15, *) {
+            do {
+                try input.setVoiceProcessingEnabled(true)
+                debugLog("record: voice processing enabled")
+            } catch {
+                debugLog("record: voice processing unavailable \(error)")
+            }
+        }
 
         // Target: 16kHz, mono, 16-bit signed int
         guard let targetFormat = AVAudioFormat(
@@ -242,6 +250,14 @@ class StreamRecorder: NSObject {
 
         let input = engine.inputNode
         let hwFormat = input.outputFormat(forBus: 0)
+        if #available(macOS 10.15, *) {
+            do {
+                try input.setVoiceProcessingEnabled(true)
+                debugLog("stream-record: voice processing enabled")
+            } catch {
+                debugLog("stream-record: voice processing unavailable \(error)")
+            }
+        }
 
         guard let targetFormat = AVAudioFormat(
             commonFormat: .pcmFormatInt16,
@@ -589,23 +605,8 @@ final class HudOverlayController: NSObject {
     private func requestClose() {
         guard !closeRequested else { return }
         closeRequested = true
-
-        if let until = minVisibleUntil {
-            let delay = until.timeIntervalSinceNow
-            if delay > 0 {
-                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                    self?.terminateApp()
-                }
-                return
-            }
-        } else if !sawTerminalMessage {
-            // Grace period when session ends without explicit final/timeout/error.
-            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(300)) { [weak self] in
-                self?.terminateApp()
-            }
-            return
-        }
-
+        // ASK session ended. Close HUD immediately to avoid stale floating windows
+        // and prevent overlap across concurrent sessions.
         terminateApp()
     }
 
