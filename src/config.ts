@@ -218,6 +218,13 @@ export function ensureConfigDir(): void {
   fs.mkdirSync(path.join(CONFIG_DIR, 'logs'), { recursive: true });
 }
 
+export function ensureDefaultConfigFile(): void {
+  ensureConfigDir();
+  if (!fs.existsSync(CONFIG_FILE)) {
+    fs.writeFileSync(CONFIG_FILE, stringifyYaml(DEFAULT_CONFIG), 'utf-8');
+  }
+}
+
 export function getConfig(): EchoConfig {
   const merged = loadMergedConfig();
   const clientId = getRuntimeClientId();
