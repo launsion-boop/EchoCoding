@@ -148,7 +148,13 @@ Features:
 | **Browser** | Studio MediaRecorder | Open Studio, click "Hold to Speak" |
 | **Local** | Paraformer (zh + en bilingual) | Download ~700MB via Studio |
 
-`ask` speaks the question via TTS, opens the microphone, and returns recognized text. 60-second recording window with auto-stop on silence.
+`ask` opens a floating HUD, speaks the question via TTS, streams audio in real-time to the cloud ASR, and returns recognized text. The HUD closes when the result is returned.
+
+**Multi-turn voice conversation:** the model drives the dialog — if the answer is unclear, it calls `ask` again with a follow-up question. The HUD re-opens for each new question. This lets the model use voice as a structured input channel, not just a one-shot prompt.
+
+**Echo suppression:** a 260ms anti-bleed gate and text-level echo detection prevent TTS playback from leaking back into the ASR result. If the recognized text matches the spoken question, EchoCoding automatically re-listens (up to 2 retries).
+
+**macOS mic permissions:** EchoCoding uses a Developer ID-signed MicHelper.app to request microphone access via macOS TCC. No manual privacy settings required.
 
 ## Studio
 
@@ -189,9 +195,12 @@ Browser-based configuration panel:
                 +-- Proxy ------> coding.echoclaw.me (HMAC-SHA256 signed)
 
   ASR (foreground process, not daemon):
-       mic (sox) -> Cloud: Volcengine V3 BigModel WebSocket
-                    Local: Paraformer (optional)
-                    Browser: Studio MediaRecorder
+       MicHelper.app (Developer ID signed, TCC mic permission)
+         -> streaming PCM via Unix socket
+         -> Cloud: Volcengine V3 BigModel WebSocket (streaming)
+            Local: Paraformer (optional)
+            Browser: Studio MediaRecorder
+       Floating HUD (real-time partial text, YOU: cursor)
 ```
 
 Key design decisions:
@@ -210,7 +219,8 @@ echocoding install [--auto] [--start]   Detect agents, install hooks/MCP, option
 echocoding uninstall                    Remove all hooks and MCP configs
 echocoding start / stop / status        Daemon lifecycle
 echocoding say <text>                   Speak via TTS (blocks until playback ends)
-echocoding ask <question>               Speak question + listen for voice answer
+echocoding ask <question>               Speak question + open HUD + listen for voice answer
+echocoding ask-end                      Close active ASK HUD immediately
 echocoding listen                       Open mic, return recognized text
 echocoding sfx <name>                   Play a named sound effect
 echocoding config get/set <key> <val>   Read or write config values
@@ -411,7 +421,13 @@ AI 自己决定什么时候用哪根管道。
 | **浏览器** | Studio 网页录音 | 打开 Studio 点击录音 |
 | **本地** | Paraformer（中英双语） | Studio 下载 ~700MB |
 
-`ask` 先用 TTS 说出问题，再开麦等回答。60 秒录音窗口，静默自动停止。
+`ask` 弹出悬浮 HUD，TTS 说出问题，实时流式上传音频给云端 ASR，返回识别文本后 HUD 自动关闭。
+
+**模型驱动多轮对话：** 如果回答不够清晰，模型直接再次调用 `ask` 追问。HUD 随每个新问题重新弹出，让模型把语音当作结构化的输入通道，而不是一次性提问。
+
+**防串音：** 260ms 起始门控 + 文本级回声检测，防止 TTS 声音被 ASR 误识别。若识别结果与提问高度相似，自动重新倾听（最多 2 次）。
+
+**macOS 麦克风权限：** EchoCoding 使用 Developer ID 签名的 MicHelper.app 申请 macOS TCC 麦克风权限，无需手动设置隐私配置。
 
 ## Studio 配置面板
 
@@ -452,9 +468,12 @@ echocoding studio
                 +-- Proxy ------> coding.echoclaw.me (HMAC-SHA256 签名)
 
   ASR（前台进程，非 daemon）:
-       麦克风 (sox) -> 云端: 火山引擎 V3 BigModel WebSocket
-                      本地: Paraformer（可选）
-                      浏览器: Studio MediaRecorder
+       MicHelper.app（Developer ID 签名，TCC 麦克风授权）
+         -> 流式 PCM via Unix socket
+         -> 云端: 火山引擎 V3 BigModel WebSocket（流式）
+            本地: Paraformer（可选）
+            浏览器: Studio MediaRecorder
+       悬浮 HUD（实时 partial 文本，YOU: 光标）
 ```
 
 关键设计：
@@ -473,7 +492,8 @@ echocoding install [--auto] [--start]   检测客户端，安装 hooks/MCP，可
 echocoding uninstall                    卸载所有 hooks 和 MCP 配置
 echocoding start / stop / status        daemon 生命周期管理
 echocoding say <text>                   语音播报（阻塞至播放完成）
-echocoding ask <question>               语音提问 + 听回答
+echocoding ask <question>               语音提问 + 弹出 HUD + 听回答
+echocoding ask-end                      立即关闭当前 ASK HUD
 echocoding listen                       开麦，返回识别文字
 echocoding sfx <name>                   播放指定音效
 echocoding config get/set <key> <val>   读写配置
