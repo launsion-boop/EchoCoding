@@ -14,6 +14,8 @@ import Foundation
 import AppKit  // Needed for NSApplication run loop (permission dialogs require it)
 import Darwin
 
+let hudPidFilePath = "/tmp/echocoding-hud.pid"
+
 // MARK: - Permission
 
 func checkPermission() -> Bool {
@@ -378,6 +380,7 @@ final class HudOverlayController: NSObject {
     private let minHudOpenMs: Int = 700
     private let postTerminalHoldMs: Int = 1600
     private let eofCloseGraceMs: Int = 260
+    private let hardIdleCloseMs: Int = 65_000
     private let userLinePrefix = "YOU: "
     private let socketFd: Int32
     private var fdClosed = false
@@ -392,7 +395,8 @@ final class HudOverlayController: NSObject {
     private var readSource: DispatchSourceRead?
     private var statusAnimationTimer: DispatchSourceTimer?
     private var cursorBlinkTimer: DispatchSourceTimer?
-    private var closeTimer: DispatchSourceTimer?
+    private var idleWatchdogTimer: DispatchSourceTimer?
+    private var closeWorkItem: DispatchWorkItem?
     private var readBuffer = Data()
     private var baseStatus = "Listening"
     private var isAnimating = false
@@ -401,6 +405,7 @@ final class HudOverlayController: NSObject {
     private var minVisibleUntil: Date?
     private var scheduledCloseAt: Date?
     private var sawTerminalMessage = false
+    private var lastInboundAt = Date()
     private let maxConversationTurns = 2
 
     init(socketFd: Int32) {
@@ -409,10 +414,12 @@ final class HudOverlayController: NSObject {
 
     func start() {
         minVisibleUntil = Date().addingTimeInterval(Double(minHudOpenMs) / 1000.0)
+        lastInboundAt = Date()
         setupWindow()
         startReadLoop()
         startStatusAnimationTimer()
         startCursorBlinkTimer()
+        startIdleWatchdogTimer()
         updateStatusUI()
         ensureUserDraftVisible(force: true)
         renderConversation()
@@ -425,8 +432,10 @@ final class HudOverlayController: NSObject {
         statusAnimationTimer = nil
         cursorBlinkTimer?.cancel()
         cursorBlinkTimer = nil
-        closeTimer?.cancel()
-        closeTimer = nil
+        idleWatchdogTimer?.cancel()
+        idleWatchdogTimer = nil
+        closeWorkItem?.cancel()
+        closeWorkItem = nil
         closeFdIfNeeded()
     }
 
@@ -532,6 +541,9 @@ final class HudOverlayController: NSObject {
             var buf = [UInt8](repeating: 0, count: 4096)
             let n = Darwin.read(self.socketFd, &buf, buf.count)
             if n <= 0 {
+                if self.closeRequested { return }
+                self.readSource?.cancel()
+                self.readSource = nil
                 // EOF can race with queued UI updates (final/partial).
                 // Give the main queue a brief grace period before closing.
                 self.processTailBufferIfNeeded()
@@ -605,26 +617,29 @@ final class HudOverlayController: NSObject {
     }
 
     private func scheduleClose(at date: Date) {
+        let now = Date()
         if let scheduled = scheduledCloseAt, scheduled >= date {
+            let remainMs = Int((scheduled.timeIntervalSince(now) * 1000.0).rounded())
+            debugLog("hud: skip close reschedule remainMs=\(remainMs)")
             return
         }
         scheduledCloseAt = date
 
-        closeTimer?.cancel()
-        closeTimer = nil
+        closeWorkItem?.cancel()
+        closeWorkItem = nil
 
         let delay = max(0.0, date.timeIntervalSinceNow)
-        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.main)
-        timer.schedule(deadline: .now() + delay)
-        timer.setEventHandler { [weak self] in
+        debugLog("hud: schedule close delayMs=\(Int((delay * 1000.0).rounded()))")
+        let workItem = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
-            self.closeTimer?.cancel()
-            self.closeTimer = nil
+            self.closeWorkItem?.cancel()
+            self.closeWorkItem = nil
             self.scheduledCloseAt = nil
+            debugLog("hud: close work item fired")
             self.terminateApp()
         }
-        closeTimer = timer
-        timer.resume()
+        closeWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
     private func renderConversation() {
@@ -684,14 +699,15 @@ final class HudOverlayController: NSObject {
     }
 
     private func handleHudMessage(_ msg: [String: Any]) {
+        lastInboundAt = Date()
         guard let type = msg["type"] as? String else { return }
         switch type {
         case "reset":
             closeRequested = false
             sawTerminalMessage = false
             minVisibleUntil = Date().addingTimeInterval(Double(minHudOpenMs) / 1000.0)
-            closeTimer?.cancel()
-            closeTimer = nil
+            closeWorkItem?.cancel()
+            closeWorkItem = nil
             scheduledCloseAt = nil
             baseStatus = "Preparing"
             isAnimating = true
@@ -817,6 +833,24 @@ final class HudOverlayController: NSObject {
         timer.resume()
     }
 
+    private func startIdleWatchdogTimer() {
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.main)
+        timer.schedule(
+            deadline: .now() + .milliseconds(1000),
+            repeating: .milliseconds(1000)
+        )
+        timer.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            if self.closeRequested { return }
+            let idleMs = Date().timeIntervalSince(self.lastInboundAt) * 1000.0
+            if idleMs < Double(self.hardIdleCloseMs) { return }
+            debugLog("hud: idle watchdog close")
+            self.requestClose()
+        }
+        idleWatchdogTimer = timer
+        timer.resume()
+    }
+
     private func updateStatusUI() {
         let dots = String(repeating: ".", count: isAnimating ? dotCount : 0)
         statusLabel?.stringValue = isAnimating ? "\(baseStatus)\(dots)" : baseStatus
@@ -826,10 +860,13 @@ final class HudOverlayController: NSObject {
         closeRequested = true
         let extraUntil = Date().addingTimeInterval(Double(max(0, extraHoldMs)) / 1000.0)
         let holdUntil = max(minVisibleUntil ?? Date(), extraUntil)
+        let delayMs = Int((holdUntil.timeIntervalSinceNow * 1000.0).rounded())
+        debugLog("hud: requestClose extraHoldMs=\(extraHoldMs) delayMs=\(max(0, delayMs))")
         scheduleClose(at: holdUntil)
     }
 
     private func terminateApp() {
+        debugLog("hud: terminate app")
         NSApp.stop(nil)
         let event = NSEvent.otherEvent(
             with: .applicationDefined,
@@ -850,10 +887,12 @@ final class HudOverlayController: NSObject {
 
 final class HudAppDelegate: NSObject, NSApplicationDelegate {
     private let socketPath: String
+    private let ownerPid: Int32
     private var overlay: HudOverlayController?
 
-    init(socketPath: String) {
+    init(socketPath: String, ownerPid: Int32) {
         self.socketPath = socketPath
+        self.ownerPid = ownerPid
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -870,6 +909,7 @@ final class HudAppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         overlay?.shutdown()
         overlay = nil
+        clearHudPidIfOwned(ownerPid)
     }
 }
 
@@ -885,6 +925,43 @@ func debugLog(_ msg: String) {
     } else {
         try? line.write(toFile: logPath, atomically: true, encoding: .utf8)
     }
+}
+
+func readHudPid() -> Int32? {
+    guard let raw = try? String(contentsOfFile: hudPidFilePath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+          let value = Int32(raw)
+    else {
+        return nil
+    }
+    return value
+}
+
+func isPidAlive(_ pid: Int32) -> Bool {
+    if pid <= 1 { return false }
+    if kill(pid, 0) == 0 { return true }
+    return errno == EPERM
+}
+
+func writeHudPid(_ pid: Int32) {
+    try? "\(pid)".write(toFile: hudPidFilePath, atomically: true, encoding: .utf8)
+}
+
+func clearHudPidIfOwned(_ pid: Int32) {
+    guard let existing = readHudPid(), existing == pid else { return }
+    try? FileManager.default.removeItem(atPath: hudPidFilePath)
+}
+
+func claimHudSingleton() {
+    let selfPid = Int32(getpid())
+    if let existing = readHudPid(), existing != selfPid, isPidAlive(existing) {
+        debugLog("hud: terminating stale pid=\(existing)")
+        _ = kill(existing, SIGTERM)
+        usleep(120_000)
+        if isPidAlive(existing) {
+            _ = kill(existing, SIGKILL)
+        }
+    }
+    writeHudPid(selfPid)
 }
 
 // MARK: - Main
@@ -973,10 +1050,12 @@ case "hud":
         exit(2)
     }
     let socketPath = argList[1]
+    claimHudSingleton()
+    let selfPid = Int32(getpid())
 
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
-    let delegate = HudAppDelegate(socketPath: socketPath)
+    let delegate = HudAppDelegate(socketPath: socketPath, ownerPid: selfPid)
     app.delegate = delegate
     app.run()
     exit(0)

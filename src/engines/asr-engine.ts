@@ -108,6 +108,8 @@ interface ListenOptions {
   startGate?: ListenStartGate;
   skipReadyCue?: boolean;
   askSession?: boolean;
+  finalizeResult?: boolean;
+  duringTtsRequireDoubleTalk?: (() => boolean) | undefined;
 }
 
 interface AskOptions {
@@ -343,19 +345,23 @@ function isLikelyPromptEcho(recognizedText: string, promptText: string): boolean
   const recognized = normalizeEchoText(recognizedText);
   const prompt = normalizeEchoText(promptText);
   if (!recognized || !prompt) return false;
-  if (recognized.length < 5 || prompt.length < 5) return false;
+  const minLen = Math.min(recognized.length, prompt.length);
+  if (minLen < 2) return false;
 
   if (recognized === prompt) return true;
-  if (prompt.includes(recognized) && recognized.length >= Math.max(5, Math.floor(prompt.length * 0.55))) {
+  if (prompt.includes(recognized) && recognized.length >= Math.max(2, Math.floor(prompt.length * 0.4))) {
     return true;
   }
-  if (recognized.includes(prompt) && prompt.length >= Math.max(5, Math.floor(recognized.length * 0.55))) {
+  if (recognized.includes(prompt) && prompt.length >= Math.max(2, Math.floor(recognized.length * 0.4))) {
     return true;
   }
 
   const overlap = computeCharOverlap(recognized, prompt);
   const recognizedRatio = overlap / recognized.length;
   const promptRatio = overlap / prompt.length;
+  if (minLen <= 4) {
+    return recognizedRatio >= 0.78 && promptRatio >= 0.78;
+  }
   return recognizedRatio >= 0.9 && promptRatio >= 0.5;
 }
 
@@ -834,6 +840,7 @@ export async function ask(
       // HUD appears and recording starts immediately; users can answer right away.
       hud.updateStatus('Assistant speaking', true);
       let promptShown = false;
+      let ttsPlaybackActive = true;
       const speakTask = speak(question, {
         force: true,
         onPlaybackStart: () => {
@@ -848,6 +855,8 @@ export async function ask(
           promptShown = true;
           hud.updatePrompt(prompt);
         }
+      }).finally(() => {
+        ttsPlaybackActive = false;
       });
 
       const askDeadlineAt = Date.now() + (effectiveTimeout * 1000);
@@ -855,6 +864,7 @@ export async function ask(
       let useStartGate = true;
       let echoRetryCount = 0;
       let recoverableErrorCount = 0;
+      let hudFinalized = false;
       while (true) {
         const remainingMs = askDeadlineAt - Date.now();
         if (remainingMs <= 900) {
@@ -870,6 +880,8 @@ export async function ask(
               hud: hudEnabled,
               skipReadyCue: true,
               askSession: hudEnabled && supportsSharedAskHud(),
+              finalizeResult: false,
+              duringTtsRequireDoubleTalk: () => ttsPlaybackActive,
               startGate: useStartGate ? {
                 ready: startGateReady,
                 antiBleedMs: ASK_TTS_START_ANTIBLEED_MS,
@@ -911,6 +923,13 @@ export async function ask(
           attemptResult = '[timeout]';
         }
         if (!prompt || !isLikelyPromptEcho(attemptResult, prompt)) {
+          if (attemptResult === '[timeout]') hud.timeout();
+          else if (attemptResult === '[error]') hud.error('ASR error');
+          else {
+            hud.updatePartial(attemptResult);
+            hud.finish(attemptResult);
+          }
+          hudFinalized = true;
           result = attemptResult;
           break;
         }
@@ -925,6 +944,15 @@ export async function ask(
         hud.updateStatus('Listening', true);
         hud.updatePartial('');
         useStartGate = false;
+      }
+
+      if (!hudFinalized) {
+        if (result === '[timeout]') hud.timeout();
+        else if (result === '[error]') hud.error('ASR error');
+        else {
+          hud.updatePartial(result);
+          hud.finish(result);
+        }
       }
 
       void speakTask;
@@ -972,11 +1000,13 @@ async function listenWithHud(
     result = await listenLocal(timeoutSec, hud, options);
   }
 
-  if (result === '[timeout]') hud.timeout();
-  else if (result === '[error]') hud.error('ASR error');
-  else {
-    hud.updatePartial(result);
-    hud.finish(result);
+  if (options.finalizeResult !== false) {
+    if (result === '[timeout]') hud.timeout();
+    else if (result === '[error]') hud.error('ASR error');
+    else {
+      hud.updatePartial(result);
+      hud.finish(result);
+    }
   }
 
   return result;
@@ -1008,6 +1038,7 @@ async function listenLocal(
       options.vadOverrides,
       options.startGate,
       options.askSession,
+      options.duringTtsRequireDoubleTalk,
     );
   } catch {
     audioFile = await recordMicrophone(timeoutSec);
@@ -1473,6 +1504,7 @@ async function listenCloud(
         options.vadOverrides,
         options.startGate,
         options.askSession,
+        options.duringTtsRequireDoubleTalk,
       );
     }
 
@@ -1486,6 +1518,7 @@ async function listenCloud(
         options.vadOverrides,
         options.startGate,
         options.askSession,
+        options.duringTtsRequireDoubleTalk,
       );
     } catch (err) {
       // Graceful downgrade for older proxy versions without /v1/asr/stream.
@@ -1499,6 +1532,7 @@ async function listenCloud(
         options.vadOverrides,
         options.startGate,
         options.askSession,
+        options.duringTtsRequireDoubleTalk,
       );
     }
   } finally {
@@ -1515,6 +1549,7 @@ async function listenCloudBatch(
   vadOverrides?: Partial<VadInputConfig>,
   startGate?: ListenStartGate,
   askSession = false,
+  duringTtsRequireDoubleTalk?: () => boolean,
 ): Promise<string> {
   let audioFile: string | null = null;
   try {
@@ -1526,6 +1561,7 @@ async function listenCloudBatch(
       vadOverrides,
       startGate,
       askSession,
+      duringTtsRequireDoubleTalk,
     );
   } catch {
     // Keep compatibility when streaming mic capture is unavailable.
@@ -1564,6 +1600,7 @@ async function recordSpeechWithVad(
   vadOverrides?: Partial<VadInputConfig>,
   startGate?: ListenStartGate,
   askSession = false,
+  duringTtsRequireDoubleTalk?: () => boolean,
 ): Promise<string | null> {
   const vadConfig = getVadRuntimeConfig(timeoutSec, vadInput, vadOverrides);
   const noiseState = createAdaptiveNoiseState(vadConfig, noiseControl);
@@ -1679,7 +1716,8 @@ async function recordSpeechWithVad(
       candidateBuffers.length = 0;
       return;
     }
-    const voiced = frame.voiced;
+    const requireDoubleTalk = duringTtsRequireDoubleTalk?.() ?? false;
+    const voiced = frame.voiced && (!requireDoubleTalk || frame.voicedByDoubleTalk);
     const chunkMs = pcmBytesToMs(filteredChunk.length);
 
     if (!speechCommitted) {
@@ -1941,6 +1979,7 @@ async function listenCloudProxyStream(
   vadOverrides?: Partial<VadInputConfig>,
   startGate?: ListenStartGate,
   askSession = false,
+  duringTtsRequireDoubleTalk?: () => boolean,
 ): Promise<string> {
   const vadConfig = getVadRuntimeConfig(timeoutSec, vadInput, vadOverrides);
   const noiseState = createAdaptiveNoiseState(vadConfig, noiseControl);
@@ -2108,7 +2147,8 @@ async function listenCloudProxyStream(
       candidateBuffers.length = 0;
       return;
     }
-    const voiced = frame.voiced;
+    const requireDoubleTalk = duringTtsRequireDoubleTalk?.() ?? false;
+    const voiced = frame.voiced && (!requireDoubleTalk || frame.voicedByDoubleTalk);
     const chunkMs = pcmBytesToMs(filteredChunk.length);
 
     if (!speechCommitted) {
