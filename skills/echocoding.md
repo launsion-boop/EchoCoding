@@ -100,13 +100,13 @@ Voice mode shortens **narration** (preamble, transitions, filler), NOT content (
 - `[timeout]`/`[error]` → retry once with a shorter, explicit question; if still no response, switch to text.
 - Unclear → ask more specifically or fall back to text
 
-**ASK Session Protocol (HUD conversation):**
-- Treat ASK as a multi-turn dialog channel, not a one-shot prompt.
-- If the answer is ambiguous or incomplete, immediately issue a focused follow-up ASK in the same context.
+**ASK Session Protocol (voice dialog):**
+- Each `ask` call is self-contained: HUD opens → TTS question → ASR listens → result returned → HUD closes.
+- **Model drives multi-turn:** if the answer is ambiguous or incomplete, immediately call `ask` again with a follow-up question. The HUD re-opens for each new `ask`.
 - Ask one intent at a time (short sentence), then wait for user speech.
-- Assume ASR may be noisy (background sound / homophone errors). For key confirmations, restate and confirm again until intent is explicit.
-- HUD is session-scoped: keep dialog flowing while either side is interacting; inactivity timeout is sliding 60 seconds after the last interaction.
-- End the session only when requirements are confirmed (or user explicitly stops), then continue execution.
+- Assume ASR may be noisy (background sound / homophone errors). For key confirmations, restate and confirm again: `ask "你是说要删除整个目录吗？请确认"`.
+- Continue issuing `ask` calls until requirements are clear, then proceed with execution.
+- `ask-end` is only needed to forcibly abort a stuck HUD (rare edge case).
 
 **Timeout:** default inactivity timeout is 60 seconds. Do not proceed with irreversible actions without explicit confirmation.
 

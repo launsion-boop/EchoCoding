@@ -37,6 +37,39 @@ const ASK_LOCK_WAIT_MS = 180_000;
 const ASK_LOCK_POLL_MS = 120;
 
 type VadInputConfig = ReturnType<typeof getConfig>['asr']['vad'];
+type NoiseControlInput = ReturnType<typeof getConfig>['asr']['noiseControl'];
+type NoiseProfile = NoiseControlInput['profile'];
+
+const NOISE_PROFILE_TUNING: Record<NoiseProfile, NoiseProfileTuning> = {
+  normal: {
+    minThresholdScale: 0.85,
+    maxThresholdScale: 5.2,
+    noiseFloorMultiplier: 1.75,
+    noiseRiseAlpha: 0.22,
+    noiseFallAlpha: 0.055,
+    thresholdRiseAlpha: 0.28,
+    thresholdFallAlpha: 0.1,
+    denoiseMinGain: 0.24,
+    denoiseOpenRatio: 1.2,
+    denoiseFullRatio: 2.4,
+    denoiseAttack: 0.33,
+    denoiseRelease: 0.09,
+  },
+  'high-noise': {
+    minThresholdScale: 1.05,
+    maxThresholdScale: 6.8,
+    noiseFloorMultiplier: 2.25,
+    noiseRiseAlpha: 0.35,
+    noiseFallAlpha: 0.04,
+    thresholdRiseAlpha: 0.4,
+    thresholdFallAlpha: 0.06,
+    denoiseMinGain: 0.14,
+    denoiseOpenRatio: 1.4,
+    denoiseFullRatio: 3.0,
+    denoiseAttack: 0.38,
+    denoiseRelease: 0.06,
+  },
+};
 
 interface VADRuntimeConfig {
   rmsThreshold: number;
@@ -103,11 +136,40 @@ interface EchoVadFrame {
   filteredChunk: Buffer;
   rawRms: number;
   filteredRms: number;
+  activeThreshold: number;
   strongEcho: boolean;
   echoLikely: boolean;
   voicedByFiltered: boolean;
   voicedByDoubleTalk: boolean;
   voiced: boolean;
+}
+
+interface NoiseProfileTuning {
+  minThresholdScale: number;
+  maxThresholdScale: number;
+  noiseFloorMultiplier: number;
+  noiseRiseAlpha: number;
+  noiseFallAlpha: number;
+  thresholdRiseAlpha: number;
+  thresholdFallAlpha: number;
+  denoiseMinGain: number;
+  denoiseOpenRatio: number;
+  denoiseFullRatio: number;
+  denoiseAttack: number;
+  denoiseRelease: number;
+}
+
+interface AdaptiveNoiseState {
+  adaptiveEnabled: boolean;
+  denoiseEnabled: boolean;
+  tuning: NoiseProfileTuning;
+  baseThreshold: number;
+  minThreshold: number;
+  maxThreshold: number;
+  noiseFloorRms: number;
+  dynamicThreshold: number;
+  denoiseGain: number;
+  initialized: boolean;
 }
 
 // --- macOS mic-helper ---
@@ -805,11 +867,9 @@ export async function ask(question: string, timeoutSec?: number): Promise<string
       }
 
       void speakTask;
-      forceCloseHud = (
-        result === '[timeout]' ||
-        result === '[error]' ||
-        !supportsSharedAskHud()
-      );
+      // Always close HUD after each ask — model decides whether to call ask again.
+      // This keeps the contract clean: HUD visible = model is actively asking.
+      forceCloseHud = true;
       clearTimeout(startGateTimeout);
       openStartGate();
       return result;
@@ -886,6 +946,7 @@ async function listenLocal(
     audioFile = await recordSpeechWithVad(
       timeoutSec,
       config.asr.vad,
+      config.asr.noiseControl,
       hud,
       options.vadOverrides,
       options.startGate,
@@ -1363,6 +1424,7 @@ async function listenCloud(
         timeoutSec,
         endpoint,
         config.asr.vad,
+        config.asr.noiseControl,
         hud,
         options.vadOverrides,
         options.startGate,
@@ -1399,7 +1461,15 @@ async function listenCloudBatch(
 ): Promise<string> {
   let audioFile: string | null = null;
   try {
-    audioFile = await recordSpeechWithVad(timeoutSec, config.asr.vad, hud, vadOverrides, startGate, askSession);
+    audioFile = await recordSpeechWithVad(
+      timeoutSec,
+      config.asr.vad,
+      config.asr.noiseControl,
+      hud,
+      vadOverrides,
+      startGate,
+      askSession,
+    );
   } catch {
     // Keep compatibility when streaming mic capture is unavailable.
     audioFile = await recordMicrophone(timeoutSec);
@@ -1432,12 +1502,14 @@ async function listenCloudBatch(
 async function recordSpeechWithVad(
   timeoutSec: number,
   vadInput: VadInputConfig,
+  noiseControl: NoiseControlInput,
   hud: AsrHudController,
   vadOverrides?: Partial<VadInputConfig>,
   startGate?: ListenStartGate,
   askSession = false,
 ): Promise<string | null> {
   const vadConfig = getVadRuntimeConfig(timeoutSec, vadInput, vadOverrides);
+  const noiseState = createAdaptiveNoiseState(vadConfig, noiseControl);
   const maxSourceSec = Math.ceil(vadConfig.maxDurationMs / 1000) + 1;
   const preRollLimitBytes = Math.max(0, Math.floor((vadConfig.preRollMs / 1000) * PCM_BYTES_PER_SECOND));
   const gateDelayMs = Math.max(0, Math.floor(startGate?.antiBleedMs ?? 0));
@@ -1529,13 +1601,13 @@ async function recordSpeechWithVad(
     if (finished) return;
 
     const now = Date.now();
-    const frame = applyEchoVadFrame(chunk, vadConfig.rmsThreshold, now);
+    const frame = applyEchoVadFrame(chunk, vadConfig.rmsThreshold, now, noiseState);
     const filteredChunk = frame.filteredChunk;
     if (!gateActivated) {
       if (gateEligibleAt === null || now < gateEligibleAt) return;
       const gateRms = frame.filteredRms;
       const gateChunkMs = pcmBytesToMs(filteredChunk.length);
-      const quietThreshold = vadConfig.rmsThreshold * ASK_GATE_QUIET_FACTOR;
+      const quietThreshold = frame.activeThreshold * ASK_GATE_QUIET_FACTOR;
       quietMs = gateRms < quietThreshold ? (quietMs + gateChunkMs) : 0;
       if (quietMs < ASK_GATE_QUIET_MS && (now - gateEligibleAt) < ASK_GATE_MAX_WAIT_MS) return;
       gateActivated = true;
@@ -1807,12 +1879,14 @@ async function listenCloudProxyStream(
   timeoutSec: number,
   endpoint: string,
   vadInput: VadInputConfig,
+  noiseControl: NoiseControlInput,
   hud: AsrHudController,
   vadOverrides?: Partial<VadInputConfig>,
   startGate?: ListenStartGate,
   askSession = false,
 ): Promise<string> {
   const vadConfig = getVadRuntimeConfig(timeoutSec, vadInput, vadOverrides);
+  const noiseState = createAdaptiveNoiseState(vadConfig, noiseControl);
   const ws = await openProxyAsrStream(endpoint);
   const resultPromise = createProxyStreamResultPromise(ws, (event) => {
     if (event.type === 'partial' && event.text) {
@@ -1956,13 +2030,13 @@ async function listenCloudProxyStream(
     if (finished) return;
 
     const now = Date.now();
-    const frame = applyEchoVadFrame(chunk, vadConfig.rmsThreshold, now);
+    const frame = applyEchoVadFrame(chunk, vadConfig.rmsThreshold, now, noiseState);
     const filteredChunk = frame.filteredChunk;
     if (!gateActivated) {
       if (gateEligibleAt === null || now < gateEligibleAt) return;
       const gateRms = frame.filteredRms;
       const gateChunkMs = pcmBytesToMs(filteredChunk.length);
-      const quietThreshold = vadConfig.rmsThreshold * ASK_GATE_QUIET_FACTOR;
+      const quietThreshold = frame.activeThreshold * ASK_GATE_QUIET_FACTOR;
       quietMs = gateRms < quietThreshold ? (quietMs + gateChunkMs) : 0;
       if (quietMs < ASK_GATE_QUIET_MS && (now - gateEligibleAt) < ASK_GATE_MAX_WAIT_MS) return;
       gateActivated = true;
@@ -2115,6 +2189,116 @@ function normalizePositiveMs(value: number, fallback: number): number {
   return Math.max(1, Math.floor(value));
 }
 
+function normalizeUnit(value: number, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(1, Math.max(0, value));
+}
+
+function clamp(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, value));
+}
+
+function clampInt16(value: number): number {
+  if (value > 32767) return 32767;
+  if (value < -32768) return -32768;
+  return value | 0;
+}
+
+function resolveNoiseProfile(noiseControl: NoiseControlInput): NoiseProfile {
+  return noiseControl.profile === 'high-noise' ? 'high-noise' : 'normal';
+}
+
+function createAdaptiveNoiseState(vadConfig: VADRuntimeConfig, noiseControl: NoiseControlInput): AdaptiveNoiseState {
+  const profile = resolveNoiseProfile(noiseControl);
+  const tuning = NOISE_PROFILE_TUNING[profile];
+  const minThreshold = normalizeThreshold(vadConfig.rmsThreshold * tuning.minThresholdScale, vadConfig.rmsThreshold);
+  const maxThreshold = normalizeThreshold(vadConfig.rmsThreshold * tuning.maxThresholdScale, vadConfig.rmsThreshold);
+  const baselineThreshold = clamp(vadConfig.rmsThreshold, minThreshold, maxThreshold);
+  const baselineNoise = clamp(baselineThreshold / Math.max(1.1, tuning.noiseFloorMultiplier), 0.0001, 0.2);
+
+  return {
+    adaptiveEnabled: noiseControl.adaptiveRms !== false,
+    denoiseEnabled: noiseControl.denoise !== false,
+    tuning,
+    baseThreshold: baselineThreshold,
+    minThreshold,
+    maxThreshold,
+    noiseFloorRms: baselineNoise,
+    dynamicThreshold: baselineThreshold,
+    denoiseGain: 1,
+    initialized: false,
+  };
+}
+
+function updateAdaptiveNoiseThreshold(state: AdaptiveNoiseState, observedRms: number, strongEcho: boolean): number {
+  if (!state.adaptiveEnabled) return state.baseThreshold;
+
+  const rms = clamp(observedRms, 0.0001, 1);
+  if (!state.initialized) {
+    state.noiseFloorRms = rms;
+    state.dynamicThreshold = clamp(
+      Math.max(state.baseThreshold, state.noiseFloorRms * state.tuning.noiseFloorMultiplier),
+      state.minThreshold,
+      state.maxThreshold,
+    );
+    state.initialized = true;
+    return state.dynamicThreshold;
+  }
+
+  const nearSilence = rms < (state.dynamicThreshold * 0.92);
+  const floorAlpha = strongEcho || nearSilence
+    ? (rms > state.noiseFloorRms ? state.tuning.noiseRiseAlpha : state.tuning.noiseFallAlpha)
+    : 0.01;
+
+  state.noiseFloorRms += (rms - state.noiseFloorRms) * floorAlpha;
+
+  const targetThreshold = clamp(
+    Math.max(state.baseThreshold, state.noiseFloorRms * state.tuning.noiseFloorMultiplier),
+    state.minThreshold,
+    state.maxThreshold,
+  );
+  const thresholdAlpha = targetThreshold > state.dynamicThreshold
+    ? state.tuning.thresholdRiseAlpha
+    : state.tuning.thresholdFallAlpha;
+
+  state.dynamicThreshold += (targetThreshold - state.dynamicThreshold) * thresholdAlpha;
+  state.dynamicThreshold = clamp(state.dynamicThreshold, state.minThreshold, state.maxThreshold);
+  return state.dynamicThreshold;
+}
+
+function applyAdaptiveNoiseGate(chunk: Buffer, state: AdaptiveNoiseState): Buffer {
+  if (!state.denoiseEnabled || chunk.length < 2) return chunk;
+  const sampleCount = Math.floor(chunk.length / 2);
+  if (sampleCount <= 0) return chunk;
+
+  const out = Buffer.allocUnsafe(sampleCount * 2);
+  const openLevel = Math.max(0.00025, state.noiseFloorRms * state.tuning.denoiseOpenRatio);
+  const fullLevel = Math.max(openLevel * 1.2, state.noiseFloorRms * state.tuning.denoiseFullRatio);
+  const minGain = normalizeUnit(state.tuning.denoiseMinGain, 0.2);
+  let gain = clamp(state.denoiseGain, minGain, 1);
+
+  for (let i = 0; i < sampleCount; i++) {
+    const sample = chunk.readInt16LE(i * 2);
+    const magnitude = Math.abs(sample) / 32768;
+    let targetGain = 1;
+    if (magnitude <= openLevel) {
+      targetGain = minGain;
+    } else if (magnitude < fullLevel) {
+      const ratio = (magnitude - openLevel) / Math.max(1e-9, fullLevel - openLevel);
+      const eased = ratio * ratio * (3 - (2 * ratio));
+      targetGain = minGain + ((1 - minGain) * eased);
+    }
+
+    const alpha = targetGain > gain ? state.tuning.denoiseAttack : state.tuning.denoiseRelease;
+    gain += (targetGain - gain) * alpha;
+    out.writeInt16LE(clampInt16(Math.round(sample * gain)), i * 2);
+  }
+
+  state.denoiseGain = clamp(gain, minGain, 1);
+  return out;
+}
+
 function openProxyAsrStream(endpoint: string): Promise<WebSocket> {
   const streamUrl = resolveStreamEndpoint(endpoint);
   const authHeaders = signRequest('', 'GET', streamUrl.pathname || '/v1/asr/stream');
@@ -2243,21 +2427,34 @@ function pcmBytesToMs(bytes: number): number {
   return (bytes / PCM_BYTES_PER_SECOND) * 1000;
 }
 
-function applyEchoVadFrame(chunk: Buffer, rmsThreshold: number, nowMs: number): EchoVadFrame {
-  const filteredChunk = filterEchoChunk(chunk, nowMs);
+function applyEchoVadFrame(
+  chunk: Buffer,
+  rmsThreshold: number,
+  nowMs: number,
+  noiseState?: AdaptiveNoiseState,
+): EchoVadFrame {
+  const echoFilteredChunk = filterEchoChunk(chunk, nowMs);
   const rawRms = computeRms(chunk);
-  const filteredRms = computeRms(filteredChunk);
+  const echoFilteredRms = computeRms(echoFilteredChunk);
   const strongEcho = shouldSuppressEchoChunk(chunk, nowMs);
+  const activeThreshold = noiseState
+    ? updateAdaptiveNoiseThreshold(noiseState, echoFilteredRms, strongEcho)
+    : rmsThreshold;
+  const filteredChunk = noiseState
+    ? applyAdaptiveNoiseGate(echoFilteredChunk, noiseState)
+    : echoFilteredChunk;
+  const filteredRms = computeRms(filteredChunk);
   const ratio = filteredRms / Math.max(1e-9, rawRms);
-  const echoLikely = strongEcho || (rawRms >= rmsThreshold && ratio <= ECHO_ONLY_RMS_RATIO_MAX);
-  const voicedByFiltered = filteredRms >= rmsThreshold;
-  const voicedByDoubleTalk = filteredRms >= (rmsThreshold * ECHO_DOUBLE_TALK_RMS_FACTOR);
+  const echoLikely = strongEcho || (rawRms >= activeThreshold && ratio <= ECHO_ONLY_RMS_RATIO_MAX);
+  const voicedByFiltered = filteredRms >= activeThreshold;
+  const voicedByDoubleTalk = filteredRms >= (activeThreshold * ECHO_DOUBLE_TALK_RMS_FACTOR);
   const voiced = voicedByFiltered && (!strongEcho || voicedByDoubleTalk) && (!echoLikely || voicedByDoubleTalk);
 
   return {
     filteredChunk,
     rawRms,
     filteredRms,
+    activeThreshold,
     strongEcho,
     echoLikely,
     voicedByFiltered,

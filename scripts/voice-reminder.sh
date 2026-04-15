@@ -51,8 +51,8 @@ esac
 case "$LEVEL" in
   balanced)
     emit_reminder \
-      "<user-prompt-submit-hook>💡 平衡模式：评估本次回复是否需要语音播报。如果有重要信息、阶段性结论或需要用户关注的内容，建议先 echocoding say 一句摘要。纯工具调用或简短确认可以不说。⚠️ 如果需要反问用户或请求确认，必须用 echocoding ask，不能用文字提问。ASK 不是一次性提问：若需求未澄清，请连续多轮 ask；HUD 会话按最后一次互动滑动 60 秒超时自动关闭。注意 ASR 可能受噪音影响，关键确认需复述并二次确认。</user-prompt-submit-hook>" \
-      "EchoCoding 平衡模式已开启：如果这次回复有重要信息、阶段性结论或需要用户注意的内容，请先执行 \`echocoding say\` 用一句话播报，再输出完整文字。⚠️ 需要反问用户时，必须用 \`echocoding ask\`。若需求未澄清，请连续多轮 ask（HUD 会话按最后互动 60 秒超时）；关键确认要复述并再确认一次。"
+      "<user-prompt-submit-hook>💡 平衡模式：评估本次回复是否需要语音播报。如果有重要信息、阶段性结论或需要用户关注的内容，建议先 echocoding say 一句摘要。纯工具调用或简短确认可以不说。⚠️ 如果需要反问用户或请求确认，必须用 echocoding ask，不能用文字提问。每次 ask 返回后 HUD 自动关闭；如需继续追问，直接再次调用 ask。注意 ASR 可能受噪音影响，关键确认需复述并二次确认。</user-prompt-submit-hook>" \
+      "EchoCoding 平衡模式已开启：如果这次回复有重要信息、阶段性结论或需要用户注意的内容，请先执行 \`echocoding say\` 用一句话播报，再输出完整文字。⚠️ 需要反问用户时，必须用 \`echocoding ask\`。每次 ask 返回后 HUD 自动关闭，如需追问直接再次 ask；关键确认要复述并再确认一次。"
     ;;
   verbose)
     emit_reminder \
