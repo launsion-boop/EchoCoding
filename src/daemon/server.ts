@@ -3,12 +3,12 @@ import fs from 'node:fs';
 import { getConfig, ensureConfigDir, resolveDaemonPaths } from '../config.js';
 import { playSfx, playSfxAmbient } from '../engines/sfx-engine.js';
 import { speak, cleanupTempFiles, disposeTts } from '../engines/voice-engine.js';
-import { listen, ask, disposeAsr } from '../engines/asr-engine.js';
+import { listen, ask, closeAskSessionHud, disposeAsr } from '../engines/asr-engine.js';
 import { handleHookEvent, parseHookEvent, setAmbientControls } from '../hook-handler.js';
 import { resetThrottle } from '../throttle.js';
 
 interface DaemonMessage {
-  type: 'hook' | 'say' | 'sfx' | 'ask' | 'listen' | 'ping';
+  type: 'hook' | 'say' | 'sfx' | 'ask' | 'listen' | 'ask-end' | 'ping';
   data?: Record<string, unknown>;
   text?: string;
   name?: string;
@@ -182,6 +182,12 @@ function handleMessage(msg: DaemonMessage, conn?: net.Socket): void {
         .catch(() => {
           try { conn?.write(JSON.stringify({ result: '[error]' }) + '\n'); } catch { /* */ }
         });
+      break;
+    }
+
+    case 'ask-end': {
+      closeAskSessionHud();
+      try { conn?.write(JSON.stringify({ result: 'done' }) + '\n'); } catch { /* */ }
       break;
     }
 

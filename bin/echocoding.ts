@@ -2,7 +2,7 @@
 
 import { Command } from 'commander';
 import { isDaemonRunning, stopDaemon } from '../src/daemon/server.js';
-import { sendSay, sendSfx, sendAsk, sendListen, sendWithResponse, pingDaemon } from '../src/daemon/client.js';
+import { sendSay, sendSfx, sendAsk, sendListen, sendAskEnd, sendWithResponse, pingDaemon } from '../src/daemon/client.js';
 import { installClaudeCode, uninstallClaudeCode, installCodex, uninstallCodex, detectInstalledAgents } from '../src/installer.js';
 import { detectInstalledClients, getAllAdapters } from '../src/adapters/registry.js';
 import { getConfig, setConfigValue, getConfigValue, ensureConfigDir, saveConfig, getRuntimeClientId } from '../src/config.js';
@@ -285,6 +285,30 @@ program
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       process.stderr.write(`[echocoding] ASR error: ${msg}\n`);
+      process.stdout.write('[error]\n');
+    }
+  });
+
+// --- ask-end ---
+program
+  .command('ask-end')
+  .description('Close active ASK HUD session immediately')
+  .action(async () => {
+    try {
+      await sendAskEnd();
+      process.stdout.write('done\n');
+      return;
+    } catch {
+      // Fallback: foreground close when daemon is unavailable.
+    }
+
+    try {
+      const { closeAskSessionHud } = await import('../src/engines/asr-engine.js');
+      closeAskSessionHud();
+      process.stdout.write('done\n');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[echocoding] ASK end error: ${msg}\n`);
       process.stdout.write('[error]\n');
     }
   });

@@ -98,6 +98,14 @@ class Recorder: NSObject {
 
         let input = engine.inputNode
         let hwFormat = input.outputFormat(forBus: 0)
+        if #available(macOS 10.15, *) {
+            do {
+                try input.setVoiceProcessingEnabled(true)
+                debugLog("record: voice processing enabled")
+            } catch {
+                debugLog("record: voice processing unavailable \(error)")
+            }
+        }
 
         // Target: 16kHz, mono, 16-bit signed int
         guard let targetFormat = AVAudioFormat(
@@ -242,6 +250,14 @@ class StreamRecorder: NSObject {
 
         let input = engine.inputNode
         let hwFormat = input.outputFormat(forBus: 0)
+        if #available(macOS 10.15, *) {
+            do {
+                try input.setVoiceProcessingEnabled(true)
+                debugLog("stream-record: voice processing enabled")
+            } catch {
+                debugLog("stream-record: voice processing unavailable \(error)")
+            }
+        }
 
         guard let targetFormat = AVAudioFormat(
             commonFormat: .pcmFormatInt16,
@@ -337,8 +353,9 @@ final class HudOverlayController: NSObject {
     private var fdClosed = false
     private var window: NSPanel?
     private var statusLabel: NSTextField?
-    private var promptLabel: NSTextField?
-    private var transcriptLabel: NSTextField?
+    private var conversationView: NSTextView?
+    private var conversationLines: [String] = []
+    private var currentUserDraft: String?
     private var readSource: DispatchSourceRead?
     private var animationTimer: DispatchSourceTimer?
     private var readBuffer = Data()
@@ -348,6 +365,7 @@ final class HudOverlayController: NSObject {
     private var closeRequested = false
     private var minVisibleUntil: Date?
     private var sawTerminalMessage = false
+    private let maxConversationTurns = 2
 
     init(socketFd: Int32) {
         self.socketFd = socketFd
@@ -375,11 +393,11 @@ final class HudOverlayController: NSObject {
     }
 
     private func setupWindow() {
-        let width: CGFloat = 560
-        let height: CGFloat = 216
+        let width: CGFloat = 500
+        let height: CGFloat = 210
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
         let x = screen.midX - (width / 2)
-        let y = screen.maxY - height - 28
+        let y = screen.maxY - height - 10
         let frame = NSRect(x: x, y: y, width: width, height: height)
 
         let panel = NSPanel(
@@ -403,52 +421,51 @@ final class HudOverlayController: NSObject {
         let content = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         panel.contentView = content
 
-        let titleLabel = NSTextField(labelWithString: "EchoCoding Voice Ask")
-        titleLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        let titleLabel = NSTextField(labelWithString: "EchoCoding Ask")
+        titleLabel.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
         titleLabel.textColor = NSColor(calibratedWhite: 0.87, alpha: 1.0)
-        titleLabel.frame = NSRect(x: 18, y: 178, width: width - 36, height: 18)
+        titleLabel.frame = NSRect(x: 18, y: height - 38, width: width - 36, height: 18)
         content.addSubview(titleLabel)
 
         let status = NSTextField(labelWithString: "Listening")
-        status.font = NSFont.monospacedSystemFont(ofSize: 14, weight: .medium)
+        status.font = NSFont.monospacedSystemFont(ofSize: 16, weight: .medium)
         status.textColor = NSColor(calibratedRed: 0.57, green: 0.85, blue: 1.0, alpha: 1.0)
-        status.frame = NSRect(x: 18, y: 154, width: width - 36, height: 18)
+        status.frame = NSRect(x: 18, y: height - 62, width: width - 36, height: 18)
         content.addSubview(status)
         self.statusLabel = status
 
-        let promptHeader = NSTextField(labelWithString: "Assistant")
-        promptHeader.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
-        promptHeader.textColor = NSColor(calibratedWhite: 0.72, alpha: 1.0)
-        promptHeader.frame = NSRect(x: 18, y: 130, width: width - 36, height: 14)
-        content.addSubview(promptHeader)
+        let timelineHeader = NSTextField(labelWithString: "Recent (2 turns)")
+        timelineHeader.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        timelineHeader.textColor = NSColor(calibratedWhite: 0.72, alpha: 1.0)
+        timelineHeader.frame = NSRect(x: 18, y: height - 84, width: width - 36, height: 14)
+        content.addSubview(timelineHeader)
 
-        let prompt = NSTextField(labelWithString: "...")
-        prompt.font = NSFont.systemFont(ofSize: 13, weight: .regular)
-        prompt.textColor = NSColor(calibratedWhite: 0.92, alpha: 1.0)
-        prompt.frame = NSRect(x: 18, y: 92, width: width - 36, height: 36)
-        prompt.cell?.wraps = true
-        prompt.cell?.lineBreakMode = .byTruncatingTail
-        prompt.maximumNumberOfLines = 2
-        prompt.usesSingleLineMode = false
-        content.addSubview(prompt)
-        self.promptLabel = prompt
+        let scrollFrame = NSRect(x: 18, y: 14, width: width - 36, height: height - 104)
+        let scrollView = NSScrollView(frame: scrollFrame)
+        scrollView.borderType = .noBorder
+        scrollView.hasVerticalScroller = false
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.drawsBackground = false
 
-        let transcriptHeader = NSTextField(labelWithString: "You (ASR)")
-        transcriptHeader.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
-        transcriptHeader.textColor = NSColor(calibratedWhite: 0.72, alpha: 1.0)
-        transcriptHeader.frame = NSRect(x: 18, y: 70, width: width - 36, height: 14)
-        content.addSubview(transcriptHeader)
-
-        let transcript = NSTextField(labelWithString: "Waiting for your response...")
-        transcript.font = NSFont.monospacedSystemFont(ofSize: 14, weight: .semibold)
-        transcript.textColor = NSColor(calibratedRed: 0.74, green: 0.98, blue: 0.86, alpha: 1.0)
-        transcript.frame = NSRect(x: 18, y: 16, width: width - 36, height: 52)
-        transcript.cell?.wraps = true
-        transcript.cell?.lineBreakMode = .byWordWrapping
-        transcript.maximumNumberOfLines = 3
-        transcript.usesSingleLineMode = false
-        content.addSubview(transcript)
-        self.transcriptLabel = transcript
+        let textView = NSTextView(frame: NSRect(origin: .zero, size: scrollFrame.size))
+        textView.isEditable = false
+        textView.isSelectable = false
+        textView.drawsBackground = false
+        textView.font = NSFont.monospacedSystemFont(ofSize: 15, weight: .regular)
+        textView.textColor = NSColor(calibratedWhite: 0.9, alpha: 1.0)
+        textView.string = ""
+        textView.textContainerInset = NSSize(width: 4, height: 6)
+        textView.textContainer?.lineBreakMode = .byWordWrapping
+        textView.textContainer?.widthTracksTextView = true
+        textView.minSize = NSSize(width: 0, height: scrollFrame.height)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        scrollView.documentView = textView
+        content.addSubview(scrollView)
+        self.conversationView = textView
+        self.conversationLines = []
 
         panel.orderFrontRegardless()
         NSApp.activate(ignoringOtherApps: false)
@@ -502,6 +519,35 @@ final class HudOverlayController: NSObject {
         DispatchQueue.main.async { self.handleHudMessage(json) }
     }
 
+    private func trimConversationIfNeeded() {
+        let maxConversationLines = maxConversationTurns * 2
+        if conversationLines.count <= maxConversationLines { return }
+        conversationLines = Array(conversationLines.suffix(maxConversationLines))
+    }
+
+    private func appendConversationLine(_ line: String) {
+        let text = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        conversationLines.append(text)
+        trimConversationIfNeeded()
+        renderConversation()
+    }
+
+    private func renderConversation() {
+        guard let view = conversationView else { return }
+        var lines = conversationLines
+        if let draft = currentUserDraft?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !draft.isEmpty {
+            lines.append("You: \(draft) ...")
+        }
+        if lines.isEmpty {
+            view.string = "AI: Waiting for voice..."
+        } else {
+            view.string = lines.joined(separator: "\n")
+        }
+        view.scrollToEndOfDocument(nil)
+    }
+
     private func handleHudMessage(_ msg: [String: Any]) {
         guard let type = msg["type"] as? String else { return }
         switch type {
@@ -512,12 +558,16 @@ final class HudOverlayController: NSObject {
             baseStatus = "Preparing"
             isAnimating = true
             dotCount = 0
-            transcriptLabel?.stringValue = "Waiting for your response..."
+            currentUserDraft = nil
+            if (msg["clear"] as? Bool) == true {
+                conversationLines.removeAll(keepingCapacity: true)
+            }
+            renderConversation()
             updateStatusUI()
         case "prompt":
             let text = (msg["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if !text.isEmpty {
-                promptLabel?.stringValue = text
+                appendConversationLine("AI: \(text)")
             }
         case "status":
             baseStatus = (msg["text"] as? String) ?? baseStatus
@@ -527,7 +577,8 @@ final class HudOverlayController: NSObject {
         case "partial":
             let text = (msg["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if !text.isEmpty {
-                transcriptLabel?.stringValue = "You: \(text)"
+                currentUserDraft = text
+                renderConversation()
                 debugLog("hud: partial text=\(String(text.prefix(120)))")
             }
         case "final":
@@ -537,8 +588,11 @@ final class HudOverlayController: NSObject {
             dotCount = 0
             let rawText = (msg["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let text = rawText == "[empty]" ? "未识别到清晰语音" : rawText
-            transcriptLabel?.stringValue = text.isEmpty ? "Done" : "You: \(text)"
-            minVisibleUntil = Date().addingTimeInterval(10.0)
+            if !text.isEmpty {
+                appendConversationLine("You: \(text)")
+            }
+            currentUserDraft = nil
+            renderConversation()
             debugLog("hud: final text=\(String(text.prefix(120)))")
             updateStatusUI()
         case "timeout":
@@ -546,8 +600,8 @@ final class HudOverlayController: NSObject {
             baseStatus = "Timeout"
             isAnimating = false
             dotCount = 0
-            transcriptLabel?.stringValue = "You: No speech detected"
-            minVisibleUntil = Date().addingTimeInterval(10.0)
+            currentUserDraft = nil
+            appendConversationLine("System: No speech detected")
             debugLog("hud: timeout")
             updateStatusUI()
         case "error":
@@ -556,8 +610,8 @@ final class HudOverlayController: NSObject {
             isAnimating = false
             dotCount = 0
             let text = (msg["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            transcriptLabel?.stringValue = text.isEmpty ? "You: ASR error" : "You: \(text)"
-            minVisibleUntil = Date().addingTimeInterval(10.0)
+            currentUserDraft = nil
+            appendConversationLine(text.isEmpty ? "System: ASR error" : "System: \(text)")
             debugLog("hud: error text=\(String(text.prefix(120)))")
             updateStatusUI()
         case "close":
@@ -589,23 +643,8 @@ final class HudOverlayController: NSObject {
     private func requestClose() {
         guard !closeRequested else { return }
         closeRequested = true
-
-        if let until = minVisibleUntil {
-            let delay = until.timeIntervalSinceNow
-            if delay > 0 {
-                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                    self?.terminateApp()
-                }
-                return
-            }
-        } else if !sawTerminalMessage {
-            // Grace period when session ends without explicit final/timeout/error.
-            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(300)) { [weak self] in
-                self?.terminateApp()
-            }
-            return
-        }
-
+        // ASK session ended. Close HUD immediately to avoid stale floating windows
+        // and prevent overlap across concurrent sessions.
         terminateApp()
     }
 

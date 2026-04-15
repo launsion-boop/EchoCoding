@@ -61,10 +61,18 @@ Voice mode shortens **narration** (preamble, transitions, filler), NOT content (
 **Response handling:**
 - Approval ("yes", "ok", "go") → proceed
 - Denial ("no", "cancel") → stop/change
-- `[timeout]`/`[error]` → text: "没有收到语音回复，你可以文字回复确认。" Wait for text.
+- `[timeout]`/`[error]` → retry once with a shorter, explicit question; if still no response, switch to text.
 - Unclear → ask more specifically or fall back to text
 
-**Timeout:** 60-second ASR window. On timeout, do NOT retry voice — switch to text. Never proceed with irreversible actions without confirmation.
+**ASK Session Protocol (HUD conversation):**
+- Treat ASK as a multi-turn dialog channel, not a one-shot prompt.
+- If the answer is ambiguous or incomplete, immediately issue a focused follow-up ASK in the same context.
+- Ask one intent at a time (short sentence), then wait for user speech.
+- Assume ASR may be noisy (background sound / homophone errors). For key confirmations, restate and confirm again until intent is explicit.
+- HUD is session-scoped: keep dialog flowing while either side is interacting; inactivity timeout is sliding 60 seconds after the last interaction.
+- End the session only when requirements are confirmed (or user explicitly stops), then continue execution.
+
+**Timeout:** default inactivity timeout is 60 seconds. Never proceed with irreversible actions without confirmation.
 
 ### 7. Hook Sound Coordination
 
