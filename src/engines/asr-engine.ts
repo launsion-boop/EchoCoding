@@ -8,7 +8,7 @@ import WebSocket, { type RawData } from 'ws';
 import { getConfig, getPackageRoot } from '../config.js';
 import { playSfx } from './sfx-engine.js';
 import { signRequest } from '../auth.js';
-import { filterEchoChunk } from './echo-guard.js';
+import { filterEchoChunk, shouldSuppressEchoChunk } from './echo-guard.js';
 
 const TEMP_DIR = path.join(os.tmpdir(), 'echocoding-asr');
 const MAC_MIC_SETTINGS_URL = 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone';
@@ -25,6 +25,10 @@ const ASK_SHARED_MIC_MAX_SEC = 30 * 60;
 const ASK_GATE_QUIET_MS = 100;
 const ASK_GATE_MAX_WAIT_MS = 280;
 const ASK_GATE_QUIET_FACTOR = 0.75;
+const ASK_TTS_START_GATE_TIMEOUT_MS = 1_500;
+const ASK_TTS_START_ANTIBLEED_MS = 140;
+const ECHO_ONLY_RMS_RATIO_MAX = 0.72;
+const ECHO_DOUBLE_TALK_RMS_FACTOR = 1.22;
 const ASK_LOCK_DIR = path.join(os.tmpdir(), 'echocoding-ask.lock');
 const ASK_LOCK_OWNER_FILE = path.join(ASK_LOCK_DIR, 'owner.json');
 const ASK_LOCK_STALE_MS = 180_000;
@@ -92,6 +96,17 @@ interface SharedAskMicSession {
   stream: MicrophoneStream;
   taps: Set<SharedAskMicTap>;
   closeTimer: NodeJS.Timeout | null;
+}
+
+interface EchoVadFrame {
+  filteredChunk: Buffer;
+  rawRms: number;
+  filteredRms: number;
+  strongEcho: boolean;
+  echoLikely: boolean;
+  voicedByFiltered: boolean;
+  voicedByDoubleTalk: boolean;
+  voiced: boolean;
 }
 
 // --- macOS mic-helper ---
@@ -653,14 +668,32 @@ export async function ask(question: string, timeoutSec?: number): Promise<string
 
   try {
     const hud = await acquireAskHud(hudEnabled);
+    let releaseStartGate: (() => void) | null = null;
+    const startGateReady = new Promise<void>((resolve) => {
+      releaseStartGate = resolve;
+    });
+    let startGateReleased = false;
+    const openStartGate = () => {
+      if (startGateReleased) return;
+      startGateReleased = true;
+      releaseStartGate?.();
+    };
+    const startGateTimeout = setTimeout(openStartGate, ASK_TTS_START_GATE_TIMEOUT_MS);
+    startGateTimeout.unref();
+
     try {
       hud.reset();
+
       const listenPromise = listenWithHud(
         effectiveTimeout,
         {
           hud: hudEnabled,
           skipReadyCue: true,
           askSession: hudEnabled && supportsSharedAskHud(),
+          startGate: {
+            ready: startGateReady,
+            antiBleedMs: ASK_TTS_START_ANTIBLEED_MS,
+          },
           // Ask mode: if there is no clear response, keep channel open up to 60s.
           vadOverrides: {
             // Favor responsiveness during interactive ask.
@@ -681,24 +714,31 @@ export async function ask(question: string, timeoutSec?: number): Promise<string
       const speakTask = speak(question, {
         force: true,
         onPlaybackStart: () => {
+          openStartGate();
           if (promptShown) return;
           promptShown = true;
           if (prompt) hud.updatePrompt(prompt);
         },
       }).catch(() => {
+        openStartGate();
         if (!promptShown && prompt) {
           promptShown = true;
           hud.updatePrompt(prompt);
         }
       });
 
-      const result = await listenPromise;
+      let result = await listenPromise;
+      if (result === '[empty]') {
+        result = '[timeout]';
+      }
       void speakTask;
       forceCloseHud = (
         result === '[timeout]' ||
         result === '[error]' ||
         !supportsSharedAskHud()
       );
+      clearTimeout(startGateTimeout);
+      openStartGate();
       return result;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -706,6 +746,8 @@ export async function ask(question: string, timeoutSec?: number): Promise<string
       forceCloseHud = true;
       throw err;
     } finally {
+      clearTimeout(startGateTimeout);
+      openStartGate();
       await releaseAskHud(hud, hudEnabled, { forceClose: forceCloseHud });
     }
   } catch (err) {
@@ -1335,7 +1377,9 @@ async function recordSpeechWithVad(
   let candidateActive = false;
   let candidateVoicedMs = 0;
   let candidateLastVoiceAt = 0;
+  let candidateHasNonEchoVoiced = false;
   let lastVoiceAt = 0;
+  let speechHasNonEchoVoiced = false;
 
   const preRollBuffers: Buffer[] = [];
   const candidateBuffers: Buffer[] = [];
@@ -1401,6 +1445,10 @@ async function recordSpeechWithVad(
       settleResolve(null);
       return;
     }
+    if (!speechHasNonEchoVoiced) {
+      settleResolve(null);
+      return;
+    }
     settleResolve(Buffer.concat(speechBuffers, speechBytes));
   };
 
@@ -1408,10 +1456,11 @@ async function recordSpeechWithVad(
     if (finished) return;
 
     const now = Date.now();
-    const filteredChunk = filterEchoChunk(chunk, now);
+    const frame = applyEchoVadFrame(chunk, vadConfig.rmsThreshold, now);
+    const filteredChunk = frame.filteredChunk;
     if (!gateActivated) {
       if (gateEligibleAt === null || now < gateEligibleAt) return;
-      const gateRms = computeRms(filteredChunk);
+      const gateRms = frame.filteredRms;
       const gateChunkMs = pcmBytesToMs(filteredChunk.length);
       const quietThreshold = vadConfig.rmsThreshold * ASK_GATE_QUIET_FACTOR;
       quietMs = gateRms < quietThreshold ? (quietMs + gateChunkMs) : 0;
@@ -1422,12 +1471,13 @@ async function recordSpeechWithVad(
       candidateActive = false;
       candidateVoicedMs = 0;
       candidateLastVoiceAt = 0;
+      candidateHasNonEchoVoiced = false;
       preRollBuffers.length = 0;
       preRollBytes = 0;
       candidateBuffers.length = 0;
       return;
     }
-    const voiced = computeRms(filteredChunk) >= vadConfig.rmsThreshold;
+    const voiced = frame.voiced;
     const chunkMs = pcmBytesToMs(filteredChunk.length);
 
     if (!speechCommitted) {
@@ -1437,6 +1487,7 @@ async function recordSpeechWithVad(
           candidateBuffers.push(...preRollBuffers, filteredChunk);
           candidateVoicedMs = chunkMs;
           candidateLastVoiceAt = now;
+          candidateHasNonEchoVoiced = !frame.echoLikely;
         } else {
           preRollBuffers.push(filteredChunk);
           preRollBytes += filteredChunk.length;
@@ -1452,16 +1503,19 @@ async function recordSpeechWithVad(
       if (voiced) {
         candidateVoicedMs += chunkMs;
         candidateLastVoiceAt = now;
+        if (!frame.echoLikely) candidateHasNonEchoVoiced = true;
       }
 
-      if (candidateVoicedMs >= vadConfig.minSpeechMs) {
+      if (candidateVoicedMs >= vadConfig.minSpeechMs && candidateHasNonEchoVoiced) {
         speechCommitted = true;
+        speechHasNonEchoVoiced = candidateHasNonEchoVoiced;
         hud.updateStatus('Recognizing', true);
         lastVoiceAt = candidateLastVoiceAt || now;
         for (const pending of candidateBuffers) appendSpeechChunk(pending);
         candidateBuffers.length = 0;
         preRollBuffers.length = 0;
         preRollBytes = 0;
+        candidateHasNonEchoVoiced = false;
         return;
       }
 
@@ -1471,6 +1525,7 @@ async function recordSpeechWithVad(
         candidateBuffers.length = 0;
         candidateVoicedMs = 0;
         candidateLastVoiceAt = 0;
+        candidateHasNonEchoVoiced = false;
         preRollBuffers.length = 0;
         preRollBytes = 0;
       }
@@ -1478,7 +1533,10 @@ async function recordSpeechWithVad(
     }
 
     appendSpeechChunk(filteredChunk);
-    if (voiced) lastVoiceAt = now;
+    if (voiced) {
+      lastVoiceAt = now;
+      if (!frame.echoLikely) speechHasNonEchoVoiced = true;
+    }
     else if (now - lastVoiceAt >= vadConfig.silenceMs) {
       hud.updateStatus('Speech ended', true);
       finishSpeech();
@@ -1708,7 +1766,9 @@ async function listenCloudProxyStream(
   let candidateActive = false;
   let candidateVoicedMs = 0;
   let candidateLastVoiceAt = 0;
+  let candidateHasNonEchoVoiced = false;
   let lastVoiceAt = 0;
+  let speechHasNonEchoVoiced = false;
 
   const preRollBuffers: Buffer[] = [];
   const candidateBuffers: Buffer[] = [];
@@ -1765,6 +1825,10 @@ async function listenCloudProxyStream(
 
   const finishSpeech = (reason: string) => {
     if (finished) return;
+    if (!speechHasNonEchoVoiced) {
+      finishTimeout();
+      return;
+    }
     finished = true;
     cleanup();
     (async () => {
@@ -1819,10 +1883,11 @@ async function listenCloudProxyStream(
     if (finished) return;
 
     const now = Date.now();
-    const filteredChunk = filterEchoChunk(chunk, now);
+    const frame = applyEchoVadFrame(chunk, vadConfig.rmsThreshold, now);
+    const filteredChunk = frame.filteredChunk;
     if (!gateActivated) {
       if (gateEligibleAt === null || now < gateEligibleAt) return;
-      const gateRms = computeRms(filteredChunk);
+      const gateRms = frame.filteredRms;
       const gateChunkMs = pcmBytesToMs(filteredChunk.length);
       const quietThreshold = vadConfig.rmsThreshold * ASK_GATE_QUIET_FACTOR;
       quietMs = gateRms < quietThreshold ? (quietMs + gateChunkMs) : 0;
@@ -1833,12 +1898,13 @@ async function listenCloudProxyStream(
       candidateActive = false;
       candidateVoicedMs = 0;
       candidateLastVoiceAt = 0;
+      candidateHasNonEchoVoiced = false;
       preRollBuffers.length = 0;
       preRollBytes = 0;
       candidateBuffers.length = 0;
       return;
     }
-    const voiced = computeRms(filteredChunk) >= vadConfig.rmsThreshold;
+    const voiced = frame.voiced;
     const chunkMs = pcmBytesToMs(filteredChunk.length);
 
     if (!speechCommitted) {
@@ -1848,6 +1914,7 @@ async function listenCloudProxyStream(
           candidateBuffers.push(...preRollBuffers, filteredChunk);
           candidateVoicedMs = chunkMs;
           candidateLastVoiceAt = now;
+          candidateHasNonEchoVoiced = !frame.echoLikely;
         } else {
           preRollBuffers.push(filteredChunk);
           preRollBytes += filteredChunk.length;
@@ -1863,10 +1930,12 @@ async function listenCloudProxyStream(
       if (voiced) {
         candidateVoicedMs += chunkMs;
         candidateLastVoiceAt = now;
+        if (!frame.echoLikely) candidateHasNonEchoVoiced = true;
       }
 
-      if (candidateVoicedMs >= vadConfig.minSpeechMs) {
+      if (candidateVoicedMs >= vadConfig.minSpeechMs && candidateHasNonEchoVoiced) {
         speechCommitted = true;
+        speechHasNonEchoVoiced = candidateHasNonEchoVoiced;
         hud.updateStatus('Recognizing', true);
         lastVoiceAt = candidateLastVoiceAt || now;
         for (const pending of candidateBuffers) {
@@ -1875,6 +1944,7 @@ async function listenCloudProxyStream(
         candidateBuffers.length = 0;
         preRollBuffers.length = 0;
         preRollBytes = 0;
+        candidateHasNonEchoVoiced = false;
         return;
       }
 
@@ -1884,6 +1954,7 @@ async function listenCloudProxyStream(
         candidateBuffers.length = 0;
         candidateVoicedMs = 0;
         candidateLastVoiceAt = 0;
+        candidateHasNonEchoVoiced = false;
         preRollBuffers.length = 0;
         preRollBytes = 0;
       }
@@ -1891,7 +1962,10 @@ async function listenCloudProxyStream(
     }
 
     if (!sendSpeechChunk(filteredChunk)) return;
-    if (voiced) lastVoiceAt = now;
+    if (voiced) {
+      lastVoiceAt = now;
+      if (!frame.echoLikely) speechHasNonEchoVoiced = true;
+    }
     else if (now - lastVoiceAt >= vadConfig.silenceMs) {
       hud.updateStatus('Speech ended', true);
       finishSpeech('silence');
@@ -2094,6 +2168,29 @@ function shouldFallbackToBatch(err: unknown): boolean {
 function pcmBytesToMs(bytes: number): number {
   if (bytes <= 0) return 0;
   return (bytes / PCM_BYTES_PER_SECOND) * 1000;
+}
+
+function applyEchoVadFrame(chunk: Buffer, rmsThreshold: number, nowMs: number): EchoVadFrame {
+  const filteredChunk = filterEchoChunk(chunk, nowMs);
+  const rawRms = computeRms(chunk);
+  const filteredRms = computeRms(filteredChunk);
+  const strongEcho = shouldSuppressEchoChunk(chunk, nowMs);
+  const ratio = filteredRms / Math.max(1e-9, rawRms);
+  const echoLikely = strongEcho || (rawRms >= rmsThreshold && ratio <= ECHO_ONLY_RMS_RATIO_MAX);
+  const voicedByFiltered = filteredRms >= rmsThreshold;
+  const voicedByDoubleTalk = filteredRms >= (rmsThreshold * ECHO_DOUBLE_TALK_RMS_FACTOR);
+  const voiced = voicedByFiltered && (!strongEcho || voicedByDoubleTalk) && (!echoLikely || voicedByDoubleTalk);
+
+  return {
+    filteredChunk,
+    rawRms,
+    filteredRms,
+    strongEcho,
+    echoLikely,
+    voicedByFiltered,
+    voicedByDoubleTalk,
+    voiced,
+  };
 }
 
 function computeRms(pcmChunk: Buffer): number {

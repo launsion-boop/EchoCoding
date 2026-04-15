@@ -19,6 +19,7 @@ interface ClientModeOverrides {
   mode?: EchoConfig['mode'];
   voiceLevel?: VoiceLevel;
   ttsEnabled?: boolean;
+  ttsVolume?: number;
   sfxEnabled?: boolean;
   sfxVolume?: number;
 }
@@ -51,6 +52,7 @@ export interface EchoConfig {
       stream: boolean;
     };
     voice: string;
+    volume: number;
     speed: number;
     language: 'zh' | 'en' | 'auto';
     emotion: boolean;          // enable emotion tags (Orpheus only)
@@ -154,6 +156,7 @@ function createDefaultConfig(env: NodeJS.ProcessEnv = process.env): EchoConfig {
       },
       // First-run default: Chinese systems use 湾湾小何, others use English female.
       voice: detectDefaultCloudVoice(env),
+      volume: 100,
       speed: 1.0,
       language: 'auto',
       emotion: true,
@@ -396,6 +399,9 @@ function applyClientRuntimeOverrides(config: EchoConfigFile, clientId: EchoClien
   if (override.ttsEnabled !== undefined) {
     next.tts = { ...next.tts, enabled: override.ttsEnabled };
   }
+  if (override.ttsVolume !== undefined) {
+    next.tts = { ...next.tts, volume: override.ttsVolume };
+  }
   if (override.sfxEnabled !== undefined || override.sfxVolume !== undefined) {
     next.sfx = {
       ...next.sfx,
@@ -415,6 +421,7 @@ function resetGlobalRuntimeFields(next: EchoConfigFile, baseline: EchoConfigFile
   next.tts = {
     ...next.tts,
     enabled: baseline.tts.enabled,
+    volume: baseline.tts.volume,
   };
   next.sfx = {
     ...next.sfx,
@@ -430,6 +437,7 @@ function captureClientRuntimeOverrides(config: EchoConfig): ClientModeOverrides 
     mode: config.mode,
     voiceLevel: config.voiceLevel,
     ttsEnabled: config.tts.enabled,
+    ttsVolume: config.tts.volume,
     sfxEnabled: config.sfx.enabled,
     sfxVolume: config.sfx.volume,
   };
