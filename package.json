@@ -10,6 +10,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "test": "node --import tsx --test test/*.test.ts",
     "dev": "tsx bin/echocoding.ts",
     "clean": "rm -rf dist",
     "postinstall": "bash scripts/build-mic-helper.sh 2>/dev/null || true",

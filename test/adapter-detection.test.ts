@@ -147,6 +147,7 @@ test('codex adapter reports integrated only after skill, instructions, hooks, an
               hooks: [
                 { type: 'command', command: 'node /tmp/echocoding-hook.js' },
                 { type: 'command', command: 'bash /tmp/auto-start.sh' },
+                { type: 'command', command: 'bash /tmp/voice-auto-mode.sh' },
               ],
             },
           ],

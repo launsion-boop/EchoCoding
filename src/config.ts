@@ -18,6 +18,14 @@ interface ClientModeOverrides {
   enabled?: boolean;
   mode?: EchoConfig['mode'];
   voiceLevel?: VoiceLevel;
+  volume?: number;
+  tts?: {
+    enabled?: boolean;
+  };
+  sfx?: {
+    enabled?: boolean;
+    volume?: number;
+  };
 }
 
 interface EchoConfigFile extends EchoConfig {
@@ -411,6 +419,15 @@ function applyClientRuntimeOverrides(config: EchoConfigFile, clientId: EchoClien
   if (override.enabled !== undefined) next.enabled = override.enabled;
   if (override.mode !== undefined) next.mode = override.mode;
   if (override.voiceLevel !== undefined) next.voiceLevel = override.voiceLevel;
+  if (override.volume !== undefined) next.volume = override.volume;
+  if (override.tts?.enabled !== undefined) next.tts = { ...next.tts, enabled: override.tts.enabled };
+  if (override.sfx?.enabled !== undefined || override.sfx?.volume !== undefined) {
+    next.sfx = {
+      ...next.sfx,
+      ...(override.sfx?.enabled !== undefined ? { enabled: override.sfx.enabled } : {}),
+      ...(override.sfx?.volume !== undefined ? { volume: override.sfx.volume } : {}),
+    };
+  }
 
   return next;
 }
@@ -419,6 +436,10 @@ function resetGlobalRuntimeFields(next: EchoConfigFile, baseline: EchoConfigFile
   next.enabled = baseline.enabled;
   next.mode = baseline.mode;
   next.voiceLevel = baseline.voiceLevel;
+  next.volume = baseline.volume;
+  next.tts.enabled = baseline.tts.enabled;
+  next.sfx.enabled = baseline.sfx.enabled;
+  next.sfx.volume = baseline.sfx.volume;
 }
 
 function captureClientRuntimeOverrides(config: EchoConfig): ClientModeOverrides {
@@ -426,6 +447,14 @@ function captureClientRuntimeOverrides(config: EchoConfig): ClientModeOverrides 
     enabled: config.enabled,
     mode: config.mode,
     voiceLevel: config.voiceLevel,
+    volume: config.volume,
+    tts: {
+      enabled: config.tts.enabled,
+    },
+    sfx: {
+      enabled: config.sfx.enabled,
+      volume: config.sfx.volume,
+    },
   };
 }
 
@@ -435,6 +464,23 @@ function normalizeClientRuntimeOverride(override: ClientModeOverrides | undefine
   if (override.enabled !== undefined) next.enabled = override.enabled;
   if (override.mode !== undefined) next.mode = override.mode;
   if (override.voiceLevel !== undefined) next.voiceLevel = override.voiceLevel;
+  if (override.volume !== undefined && Number.isFinite(override.volume)) next.volume = override.volume;
+  if (override.tts?.enabled !== undefined) {
+    next.tts = {
+      enabled: override.tts.enabled,
+    };
+  }
+  if (override.sfx?.enabled !== undefined || override.sfx?.volume !== undefined) {
+    next.sfx = {
+      ...(override.sfx?.enabled !== undefined ? { enabled: override.sfx.enabled } : {}),
+      ...(override.sfx?.volume !== undefined && Number.isFinite(override.sfx.volume)
+        ? { volume: override.sfx.volume }
+        : {}),
+    };
+  }
+  if (next.sfx && Object.keys(next.sfx).length === 0) {
+    delete next.sfx;
+  }
   return next;
 }
 
