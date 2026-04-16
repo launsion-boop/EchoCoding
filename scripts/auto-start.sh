@@ -34,6 +34,9 @@ DAEMON="$PROJECT_DIR/dist/bin/echocoding-daemon.js"
 [ -x "$NODE" ] || exit 0
 
 export ECHOCODING_CLIENT="$CLIENT"
+# Parent PID is usually the client hook runner process (Claude/Codex). Pass it
+# to daemon so it can stop itself when the owning client exits.
+export ECHOCODING_OWNER_PID="${PPID:-}"
 
 # Start daemon detached via Node child_process.
 # This is more robust than plain nohup in hook runners that clean up child jobs.

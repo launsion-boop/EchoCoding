@@ -1,6 +1,7 @@
 import net from 'node:net';
 import fs from 'node:fs';
-import { getConfig, ensureConfigDir, resolveDaemonPaths } from '../config.js';
+import { execFileSync } from 'node:child_process';
+import { getConfig, ensureConfigDir, resolveDaemonPaths, getRuntimeClientId, type EchoClientId } from '../config.js';
 import { playSfx, playSfxAmbient, killCurrentAmbient, killAllAfplay } from '../engines/sfx-engine.js';
 import { speak, cleanupTempFiles, disposeTts } from '../engines/voice-engine.js';
 import { listen, ask, closeAskSessionHud, disposeAsr } from '../engines/asr-engine.js';
@@ -16,10 +17,15 @@ interface DaemonMessage {
 }
 
 let server: net.Server | null = null;
+let lifecycleCleanup: ((reason?: string) => void) | null = null;
 
 // --- Ambient loop state ---
 let ambientInterval: ReturnType<typeof setInterval> | null = null;
 let ambientName: string | null = null;
+let clientGuardTimer: ReturnType<typeof setInterval> | null = null;
+
+const CLIENT_GUARD_POLL_MS = 4_000;
+const CLIENT_EXIT_GRACE_MS = 12_000;
 
 /**
  * Start looping an SFX at a fixed interval (e.g. thinking sound while idle).
@@ -46,6 +52,7 @@ export function stopAmbient(): void {
 }
 
 export function startDaemon(): void {
+  const runtimeClient = getRuntimeClientId();
   const config = getConfig();
   const { socketPath, pidFile } = resolveDaemonPaths(config.daemon);
 
@@ -113,8 +120,16 @@ export function startDaemon(): void {
   });
 
   // Graceful shutdown
-  const cleanup = () => {
+  let cleaned = false;
+  const cleanup = (reason = 'signal') => {
+    if (cleaned) return;
+    cleaned = true;
+    lifecycleCleanup = null;
     console.log('\n[echocoding] Shutting down...');
+    if (clientGuardTimer) {
+      clearInterval(clientGuardTimer);
+      clientGuardTimer = null;
+    }
     stopAmbient();
     killAllAfplay(); // Kill all tracked afplay processes to release coreaudiod
     server?.close();
@@ -124,11 +139,17 @@ export function startDaemon(): void {
     disposeTts();
     disposeAsr();
     resetThrottle();
+    if (reason !== 'signal') {
+      console.log(`[echocoding] Exit reason: ${reason}`);
+    }
     process.exit(0);
   };
+  lifecycleCleanup = cleanup;
 
   process.on('SIGTERM', cleanup);
   process.on('SIGINT', cleanup);
+
+  maybeStartClientGuard(runtimeClient);
 }
 
 function handleMessage(msg: DaemonMessage, conn?: net.Socket): void {
@@ -245,4 +266,68 @@ export function stopDaemon(): boolean {
   } catch {
     return false;
   }
+}
+
+function maybeStartClientGuard(clientId: EchoClientId): void {
+  if (clientId !== 'claude' && clientId !== 'codex') return;
+  if (clientGuardTimer) return;
+
+  let missingSince = 0;
+  clientGuardTimer = setInterval(() => {
+    if (isClientAlive(clientId)) {
+      missingSince = 0;
+      return;
+    }
+
+    const now = Date.now();
+    if (!missingSince) {
+      missingSince = now;
+      return;
+    }
+    if (now - missingSince < CLIENT_EXIT_GRACE_MS) return;
+
+    console.log(`[echocoding] ${clientId} process not found. Stopping daemon and all sounds.`);
+    lifecycleCleanup?.(`client-${clientId}-exit`);
+  }, CLIENT_GUARD_POLL_MS);
+  clientGuardTimer.unref?.();
+}
+
+function isClientAlive(clientId: 'claude' | 'codex'): boolean {
+  const ownerPid = Number.parseInt(process.env.ECHOCODING_OWNER_PID ?? '', 10);
+  if (Number.isInteger(ownerPid) && ownerPid > 1) {
+    try {
+      process.kill(ownerPid, 0);
+      return true;
+    } catch {
+      // fall through to process-list heuristic
+    }
+  }
+
+  const commandList = readProcessCommands();
+  if (!commandList) return true;
+
+  const matcher = getClientProcessMatcher(clientId);
+  return commandList.some((cmd) => matcher.test(cmd));
+}
+
+function readProcessCommands(): string[] | null {
+  try {
+    const output = execFileSync('ps', ['-ax', '-o', 'command='], {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return output
+      .split('\n')
+      .map((line) => line.trim().toLowerCase())
+      .filter((line) => line.length > 0);
+  } catch {
+    return null;
+  }
+}
+
+function getClientProcessMatcher(clientId: 'claude' | 'codex'): RegExp {
+  if (clientId === 'claude') {
+    return /(?:^|[\/\s])claude(?:\s|$)|claude-code|claude\.app/;
+  }
+  return /(?:^|[\/\s])codex(?:\s|$)|codex\.app/;
 }
