@@ -11,6 +11,11 @@ const AMBIENT_INTERVALS = {
 const THINKING_CUE_MIN_INTERVAL_MS = 450;
 let lastThinkingCueAt = 0;
 
+// Track whether the model is actively working (between UserPromptSubmit and Stop).
+// Prevents PostToolUse(Agent) — which can fire late after Stop in newer clients —
+// from restarting the heartbeat while the user is waiting to type.
+let modelActive = false;
+
 export function setAmbientControls(
   start: (name: string, intervalMs?: number) => void,
   stop: () => void,
@@ -60,6 +65,7 @@ export function handleHookEvent(event: HookEvent): void {
       break;
 
     case 'UserPromptSubmit':
+      modelActive = true;
       _stopAmbient?.();
       playSfx('submit');
       // Entering model-thinking state: play a cue, keep heartbeat running.
@@ -86,6 +92,7 @@ export function handleHookEvent(event: HookEvent): void {
       break;
 
     case 'Stop':
+      modelActive = false;
       _stopAmbient?.(); // AI finished — kill all ambient
       handleStop(event);
       break;
@@ -93,7 +100,9 @@ export function handleHookEvent(event: HookEvent): void {
     case 'SubagentStart':
       _stopAmbient?.();
       playSfx('agent-spawn');
-      _startAmbient?.('heartbeat', AMBIENT_INTERVALS.heartbeat);
+      if (modelActive) {
+        _startAmbient?.('heartbeat', AMBIENT_INTERVALS.heartbeat);
+      }
       break;
 
     case 'SubagentStop':
@@ -170,6 +179,10 @@ function handlePostToolUse(event: HookEvent, toolKind: ToolUseKind): void {
 }
 
 function startPostToolAmbient(event: HookEvent, toolKind: ToolUseKind): void {
+  // Guard: if Stop has already fired (modelActive=false), don't restart heartbeat.
+  // PostToolUse(Agent) can arrive after Stop in newer Claude Code clients.
+  if (!modelActive) return;
+
   const success = !event.error && (event.exit_code === undefined || event.exit_code === 0);
   if (success && toolKind === 'typing') {
     // Keep typing ambience between consecutive write commands.
