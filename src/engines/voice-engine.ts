@@ -4,7 +4,7 @@ import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { getConfig } from '../config.js';
 import { shouldThrottle, recordUsage } from '../throttle.js';
-import { playAudioFileAsync } from './sfx-engine.js';
+import { playAudioFileAsync, killTtsPlayback } from './sfx-engine.js';
 import { signRequest } from '../auth.js';
 import { clearTtsPlaybackReference, registerTtsPlaybackReference } from './echo-guard.js';
 
@@ -722,5 +722,6 @@ export function disposeTts(): void {
   ttsPlaybackQueue = Promise.resolve();
   ttsWarmupFilePath = null;
   lastTtsWarmupAt = 0;
+  killTtsPlayback(); // Kill in-flight TTS afplay process
   clearTtsPlaybackReference();
 }
