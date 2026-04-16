@@ -1,7 +1,7 @@
 import net from 'node:net';
 import fs from 'node:fs';
 import { getConfig, ensureConfigDir, resolveDaemonPaths } from '../config.js';
-import { playSfx, playSfxAmbient } from '../engines/sfx-engine.js';
+import { playSfx, playSfxAmbient, killCurrentAmbient, killAllAfplay } from '../engines/sfx-engine.js';
 import { speak, cleanupTempFiles, disposeTts } from '../engines/voice-engine.js';
 import { listen, ask, closeAskSessionHud, disposeAsr } from '../engines/asr-engine.js';
 import { handleHookEvent, parseHookEvent, setAmbientControls } from '../hook-handler.js';
@@ -29,17 +29,20 @@ export function startAmbient(sfxName: string, intervalMs = 3500): void {
   if (ambientName === sfxName && ambientInterval) return; // already playing
   stopAmbient();
   ambientName = sfxName;
-  playSfxAmbient(sfxName); // play immediately (no throttle)
+  // Don't play immediately — let the interval manage the cadence.
+  // This prevents double-play when stop+start are called back-to-back.
   ambientInterval = setInterval(() => playSfxAmbient(sfxName), intervalMs);
 }
 
-/** Stop any running ambient loop. */
+/** Stop any running ambient loop and kill in-flight ambient afplay. */
 export function stopAmbient(): void {
   if (ambientInterval) {
     clearInterval(ambientInterval);
     ambientInterval = null;
   }
   ambientName = null;
+  // Kill any currently playing ambient afplay process
+  killCurrentAmbient();
 }
 
 export function startDaemon(): void {
@@ -113,6 +116,7 @@ export function startDaemon(): void {
   const cleanup = () => {
     console.log('\n[echocoding] Shutting down...');
     stopAmbient();
+    killAllAfplay(); // Kill all tracked afplay processes to release coreaudiod
     server?.close();
     try { fs.unlinkSync(socketPath); } catch { /* ignore */ }
     try { fs.unlinkSync(pidFile); } catch { /* ignore */ }

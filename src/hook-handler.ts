@@ -1,4 +1,4 @@
-import { playSfx, playSfxAmbient } from './engines/sfx-engine.js';
+import { playSfx } from './engines/sfx-engine.js';
 
 // Ambient control — injected by daemon at init time
 let _startAmbient: ((name: string, intervalMs?: number) => void) | null = null;
@@ -187,9 +187,9 @@ function maybePlayThinkingCue(force = false): void {
     return;
   }
   lastThinkingCueAt = now;
-  // Thinking cue should track UI state transitions reliably.
-  // Use ambient playback (no throttle) and rely on local cooldown above.
-  playSfxAmbient('thinking');
+  // Use throttled playSfx — the local cooldown above plus SFX throttle
+  // together prevent overlapping thinking cue afplay processes.
+  playSfx('thinking');
 }
 
 function handleStop(event: HookEvent): void {

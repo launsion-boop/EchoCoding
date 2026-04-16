@@ -1,9 +1,78 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { getSoundsDir, getConfig } from '../config.js';
 import { shouldThrottle, recordUsage, type ThrottleOptions } from '../throttle.js';
+
+// --- Global afplay concurrency limiter ---
+// Prevents runaway coreaudiod CPU by capping concurrent afplay processes.
+const MAX_CONCURRENT_AFPLAY = 4;
+const activeAfplayProcesses = new Set<ChildProcess>();
+
+function trackAfplayProcess(child: ChildProcess): void {
+  activeAfplayProcesses.add(child);
+  child.on('close', () => activeAfplayProcesses.delete(child));
+  child.on('error', () => activeAfplayProcesses.delete(child));
+
+  // If over limit, kill the oldest process
+  if (activeAfplayProcesses.size > MAX_CONCURRENT_AFPLAY) {
+    const oldest = activeAfplayProcesses.values().next().value;
+    if (oldest && oldest !== child) {
+      try { oldest.kill(); } catch { /* ignore */ }
+      activeAfplayProcesses.delete(oldest);
+    }
+  }
+}
+
+/** Kill all tracked afplay processes (used on shutdown). */
+export function killAllAfplay(): void {
+  for (const child of activeAfplayProcesses) {
+    try { child.kill(); } catch { /* ignore */ }
+  }
+  activeAfplayProcesses.clear();
+}
+
+// --- Ambient process handle ---
+// Stores the current ambient afplay child so it can be killed on stop/switch.
+let currentAmbientChild: ChildProcess | null = null;
+
+/**
+ * Play an audio file for ambient use — returns the child process handle
+ * so callers can kill it when switching/stopping ambient.
+ */
+export function playAudioFileForAmbient(filePath: string, volume?: number): ChildProcess | null {
+  const platform = os.platform();
+  if (platform !== 'darwin') {
+    playAudioFile(filePath, volume);
+    return null;
+  }
+  const args = [filePath];
+  if (volume !== undefined) {
+    args.push('-v', (volume / 100).toFixed(2));
+  }
+  const child = spawn('afplay', args, {
+    stdio: 'ignore',
+    detached: true,
+  });
+  child.unref();
+  trackAfplayProcess(child);
+  return child;
+}
+
+/** Kill the current ambient afplay process if any. */
+export function killCurrentAmbient(): void {
+  if (currentAmbientChild) {
+    try { currentAmbientChild.kill(); } catch { /* ignore */ }
+    activeAfplayProcesses.delete(currentAmbientChild);
+    currentAmbientChild = null;
+  }
+}
+
+/** Set the current ambient child (called by server's startAmbient). */
+export function setCurrentAmbientChild(child: ChildProcess | null): void {
+  currentAmbientChild = child;
+}
 
 /**
  * Sound effect fallback chains.
@@ -119,6 +188,7 @@ export function playAudioFile(filePath: string, volume?: number): void {
       detached: true,
     });
     child.unref();
+    trackAfplayProcess(child);
   } else if (platform === 'linux') {
     // Linux: try paplay (PulseAudio), then aplay (ALSA)
     const child = spawn('paplay', [filePath], {
@@ -144,6 +214,17 @@ export function playAudioFile(filePath: string, volume?: number): void {
   }
 }
 
+// Current TTS afplay child — can be killed by disposeTts via killTtsPlayback().
+let currentTtsChild: ChildProcess | null = null;
+
+/** Kill the in-flight TTS afplay process (called from disposeTts). */
+export function killTtsPlayback(): void {
+  if (currentTtsChild) {
+    try { currentTtsChild.kill(); } catch { /* ignore */ }
+    currentTtsChild = null;
+  }
+}
+
 /**
  * Play audio file and wait for playback to finish.
  * Used by TTS to block until speech completes (text/voice sync).
@@ -158,8 +239,10 @@ export function playAudioFileAsync(filePath: string, volume?: number): Promise<v
         args.push('-v', (volume / 100).toFixed(2));
       }
       const child = spawn('afplay', args, { stdio: 'ignore' });
-      child.on('close', () => resolve());
-      child.on('error', () => resolve());
+      currentTtsChild = child;
+      trackAfplayProcess(child);
+      child.on('close', () => { currentTtsChild = null; resolve(); });
+      child.on('error', () => { currentTtsChild = null; resolve(); });
     } else if (platform === 'linux') {
       const child = spawn('paplay', [filePath], { stdio: 'ignore' });
       child.on('close', () => resolve());
@@ -181,6 +264,7 @@ export function playAudioFileAsync(filePath: string, volume?: number): Promise<v
 
 /**
  * Play an SFX for ambient loops — bypasses throttle since ambient is intentionally looping.
+ * Kills the previous ambient afplay before starting a new one to prevent overlap.
  * Do NOT use for one-shot SFX (use playSfx instead).
  */
 export function playSfxAmbient(name: string): void {
@@ -191,7 +275,10 @@ export function playSfxAmbient(name: string): void {
   const soundFile = resolveSoundFile(name);
   if (!soundFile) return;
   const volume = resolveSfxVolume(name, config.volume, config.sfx.volume);
-  playAudioFile(soundFile, volume);
+  // Kill previous ambient child before spawning a new one
+  killCurrentAmbient();
+  const child = playAudioFileForAmbient(soundFile, volume);
+  setCurrentAmbientChild(child);
 }
 
 function resolveSfxVolume(name: string, masterVolume: number, sfxVolume: number): number {
