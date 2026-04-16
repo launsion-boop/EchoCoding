@@ -26,7 +26,9 @@ const WS = require('ws');
 // --- Config from env ---
 const VOLC_APP_ID = process.env.VOLC_APP_ID || '';
 const VOLC_ACCESS_TOKEN = process.env.VOLC_ACCESS_TOKEN || '';
-const SIGNING_KEY = process.env.EC_HMAC_SECRET || 'ec-managed-v1-7a3f2b1d5e8c490f6d2a1b3e7c9f4d8a';
+const SIGNING_KEY_CURRENT = process.env.EC_HMAC_SECRET || '';
+const SIGNING_KEY_LEGACY = process.env.EC_HMAC_SECRET_LEGACY || '';
+const SIGNING_KEYS = [...new Set([SIGNING_KEY_CURRENT, SIGNING_KEY_LEGACY].filter(Boolean))];
 
 function verifyHmac(method, urlPath, timestamp, signature, body) {
   if (!timestamp || !signature) return false;
@@ -35,15 +37,28 @@ function verifyHmac(method, urlPath, timestamp, signature, body) {
   if (isNaN(ts) || Math.abs(now - ts) > 120) return false; // 2 minute window
   const bodyHash = crypto.createHash('sha256').update(body).digest('hex');
   const payload = `${method}:${urlPath}:${timestamp}:${bodyHash}`;
-  const expected = crypto.createHmac('sha256', SIGNING_KEY).update(payload).digest('hex');
-  try { return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected)); }
-  catch { return false; }
+
+  for (const signingKey of SIGNING_KEYS) {
+    const expected = crypto.createHmac('sha256', signingKey).update(payload).digest('hex');
+    try {
+      if (signature.length === expected.length && crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {
+        return true;
+      }
+    } catch {
+      // continue checking other keys
+    }
+  }
+  return false;
 }
 const PORT = parseInt(process.env.PORT || '3456', 10);
 const RATE_LIMIT_PER_MIN = parseInt(process.env.RATE_LIMIT_PER_MIN || '30', 10);
 
 if (!VOLC_APP_ID || !VOLC_ACCESS_TOKEN) {
   console.error('ERROR: Set VOLC_APP_ID and VOLC_ACCESS_TOKEN env vars');
+  process.exit(1);
+}
+if (SIGNING_KEYS.length === 0) {
+  console.error('ERROR: Set EC_HMAC_SECRET (and optional EC_HMAC_SECRET_LEGACY) env vars');
   process.exit(1);
 }
 
@@ -682,4 +697,5 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`[EchoCoding Proxy] Listening on port ${PORT}`);
   console.log(`[EchoCoding Proxy] Rate limit: ${RATE_LIMIT_PER_MIN} req/min per IP`);
   console.log(`[EchoCoding Proxy] Volcengine App ID: ${VOLC_APP_ID}`);
+  console.log(`[EchoCoding Proxy] HMAC keys loaded: ${SIGNING_KEYS.length} (legacy enabled: ${SIGNING_KEY_LEGACY ? 'yes' : 'no'})`);
 });
