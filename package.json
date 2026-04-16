@@ -1,6 +1,6 @@
 {
   "name": "echocoding",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Immersive audio feedback for Vibe Coding — make your AI coding agent talk, listen, and feel alive",
   "type": "module",
   "main": "dist/src/index.js",
@@ -44,11 +44,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/EchoClaw/echocoding"
+    "url": "https://github.com/launsion-boop/EchoCoding"
   },
-  "homepage": "https://github.com/EchoClaw/echocoding",
+  "homepage": "https://github.com/launsion-boop/EchoCoding",
   "bugs": {
-    "url": "https://github.com/EchoClaw/echocoding/issues"
+    "url": "https://github.com/launsion-boop/EchoCoding/issues"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
