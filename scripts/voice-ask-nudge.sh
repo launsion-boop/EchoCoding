@@ -105,18 +105,5 @@ except:
 " 2>/dev/null)
 
 if [ "$RESULT" = "yes" ]; then
-  # Output JSON decision to force Claude to NOT stop and retry with echocoding ask.
-  # "decision":"block" + "reason" injects the reason as a new user message.
-  python3 -c "
-import json
-reason = (
-    '⚠️ 语音模式：检测到你用文字提问（含？号），但没有调用 echocoding ask。'
-    '请立即通过 Bash 发起语音问答，不要再用文字提问：\n\n'
-    'npx echocoding ask \"你的问题\"\n\n'
-    '拿到满意答案后，再调用：\n\n'
-    'npx echocoding ask-end\n\n'
-    '关闭 HUD，然后继续输出结论。'
-)
-print(json.dumps({'decision': 'block', 'reason': reason}))
-"
+  echo "<stop-hook>💡 检测到文字提问（含？号）。下次反问用户时请改用语音问答：Bash → \`npx echocoding ask \"你的问题\"\`，拿到满意答案后 \`npx echocoding ask-end\` 关闭 HUD。</stop-hook>"
 fi
