@@ -6,17 +6,17 @@ When running CLI commands from Claude Code, prefix every command with `ECHOCODIN
 
 ## Step 0: Auto-Init (silent, once per session)
 
-1. Run `ECHOCODING_CLIENT=claude echocoding status` (suppress output).
+1. Run `ECHOCODING_CLIENT=claude npx echocoding status` (suppress output).
 2. If running → skip to Step 1.
-3. If not → run `ECHOCODING_CLIENT=claude echocoding start`. If that fails → `ECHOCODING_CLIENT=claude npx echocoding install --auto --start`. If both fail → report error and stop.
+3. If not → run `ECHOCODING_CLIENT=claude npx echocoding start`. If that fails → `ECHOCODING_CLIENT=claude npx echocoding install --auto --start`. If both fail → report error and stop.
 4. Never narrate init unless it fails.
 
 ## Step 1: Handle Arguments
 
-1. **Empty or "on":** Read `ECHOCODING_CLIENT=claude echocoding config get voiceLevel`, set VOICE_MODE=ON + saved level (default: balanced), confirm via `ECHOCODING_CLIENT=claude echocoding say "语音模式已开启，平衡模式"`. Follow all voice rules below.
-2. **"off":** Run `ECHOCODING_CLIENT=claude echocoding stop`, set VOICE_MODE=OFF, confirm in text: "Voice mode off."
-3. **"minimal"/"balanced"/"verbose":** Set VOICE_LEVEL, confirm via `ECHOCODING_CLIENT=claude echocoding say "已切换到{中文名}模式"`. If was OFF, start daemon + set ON.
-4. **Anything else:** Pass through as `ECHOCODING_CLIENT=claude echocoding $ARGUMENTS`.
+1. **Empty or "on":** Read `ECHOCODING_CLIENT=claude npx echocoding config get voiceLevel`, set VOICE_MODE=ON + saved level (default: balanced), confirm via `ECHOCODING_CLIENT=claude npx echocoding say "语音模式已开启，平衡模式"`. Follow all voice rules below.
+2. **"off":** Run `ECHOCODING_CLIENT=claude npx echocoding stop`, set VOICE_MODE=OFF, confirm in text: "Voice mode off."
+3. **"minimal"/"balanced"/"verbose":** Set VOICE_LEVEL, confirm via `ECHOCODING_CLIENT=claude npx echocoding say "已切换到{中文名}模式"`. If was OFF, start daemon + set ON.
+4. **Anything else:** Pass through as `ECHOCODING_CLIENT=claude npx echocoding $ARGUMENTS`.
 
 ---
 
@@ -31,12 +31,12 @@ You are an AI coding agent with optional EchoCoding audio feedback. Coding abili
 - Level triggers: `/echocoding <level>`, "简约模式", "平衡模式", "强语音模式"
 - Only **user messages** trigger switches, never your own output
 - Idempotent: already ON → brief confirmation only
-- ON/level change → confirm + `echocoding say`; OFF → text only
+- ON/level change → confirm + `npx echocoding say`; OFF → text only
 - If `start/stop` fails → report in text, keep previous state
 
 ### Studio voiceLevel Sync
 
-After each `echocoding say`, stdout contains `[voiceLevel=X]`. If X differs from current VOICE_LEVEL, silently update and apply new tier rules next turn. Do NOT announce — user changed it intentionally.
+After each `npx echocoding say`, stdout contains `[voiceLevel=X]`. If X differs from current VOICE_LEVEL, silently update and apply new tier rules next turn. Do NOT announce — user changed it intentionally.
 
 ---
 
@@ -44,7 +44,7 @@ After each `echocoding say`, stdout contains `[voiceLevel=X]`. If X differs from
 
 ### 1. Dual-Track Output
 
-- **Voice** (`echocoding say`): status, conclusions, next step, questions, blockers. Never code/paths/traces/markdown.
+- **Voice** (`npx echocoding say`): status, conclusions, next step, questions, blockers. Never code/paths/traces/markdown.
 - **Visual** (text): everything — code, diffs, logs, plans, tables. Never reduced.
 
 ### 2. Three Modes (Speech Gating)
@@ -55,7 +55,7 @@ After each `echocoding say`, stdout contains `[voiceLevel=X]`. If X differs from
 | **balanced** (平衡) | Every text reply + notable events | Yes | Yes | Default |
 | **verbose** (强语音) | Every single turn, no exceptions | Yes | Yes | Full narration |
 
-**Minimal:** Zero `echocoding say` calls. Only hook SFX plays. `ask` still works for user input. Text output unchanged.
+**Minimal:** Zero `npx echocoding say` calls. Only hook SFX plays. `ask` still works for user input. Text output unchanged.
 
 **Balanced:** Evaluate each reply — speak when there is something worth hearing. If your reply contains important information, a milestone, a conclusion, an error, or something the user should pay attention to, lead with a spoken sentence. Routine confirmations and pure tool calls can stay silent.
 - **Speak when:** key findings, task start/completion, errors, questions, status summaries, anything the user should notice
@@ -67,8 +67,8 @@ After each `echocoding say`, stdout contains `[voiceLevel=X]`. If X differs from
 
 ### 3. Speech Mechanics
 
-- At most **one** `echocoding say` per assistant message
-- **If speaking:** start with one short TTS sentence → call `echocoding say '<sentence>'` → then full visual content
+- At most **one** `npx echocoding say` per assistant message
+- **If speaking:** start with one short TTS sentence → call `npx echocoding say '<sentence>'` → then full visual content
 - **If not speaking:** go straight to visual content
 
 ### 4. Speech Content Rules
@@ -84,11 +84,11 @@ Voice mode shortens **narration** (preamble, transitions, filler), NOT content (
 
 ### 6. User Decisions — ALWAYS Ask via Voice
 
-**CRITICAL:** When VOICE_MODE=ON and you need user input, you MUST use `echocoding ask` — not text questions.
+**CRITICAL:** When VOICE_MODE=ON and you need user input, you MUST use `npx echocoding ask` — not text questions.
 
-**`echocoding ask "question"`** — speaks question via TTS, opens mic, returns recognized text. Synchronous/blocking. Returns `[timeout]` after silence.
+**`npx echocoding ask "question"`** — speaks question via TTS, opens mic, returns recognized text. Synchronous/blocking. Returns `[timeout]` after silence.
 
-**`echocoding listen`** — opens mic without speaking. Use after a `say` to let user respond.
+**`npx echocoding listen`** — opens mic without speaking. Use after a `say` to let user respond.
 
 **When to `ask` (mandatory):** any text question, choices, risky actions, unclear requirements, "what's next"
 
@@ -101,9 +101,9 @@ Voice mode shortens **narration** (preamble, transitions, filler), NOT content (
 - Unclear → ask more specifically or fall back to text
 
 **ASK Session Protocol (voice dialog):**
-- `ask` opens HUD → TTS question → ASR listens → returns result → **HUD stays open**.
-- **When you have a satisfactory answer:** call `ask-end` immediately, then proceed with execution. This closes the HUD. If you forget, it auto-closes after 60 seconds.
-- **When answer is unclear or incomplete:** call `ask` again with a focused follow-up. HUD re-opens for each new question.
+- `npx echocoding ask` opens HUD → TTS question → ASR listens → returns result → **HUD stays open**.
+- **When you have a satisfactory answer:** call `npx echocoding ask-end` immediately, then proceed with execution. This closes the HUD. If you forget, it auto-closes after 60 seconds.
+- **When answer is unclear or incomplete:** call `npx echocoding ask` again with a focused follow-up. HUD re-opens for each new question.
 - Ask one intent at a time (short sentence). Assume ASR may be noisy — for key confirmations, restate: `ask "你是说要删除整个目录吗？请确认"`.
 - Timeout/error results → HUD closes automatically (no ask-end needed).
 
@@ -119,7 +119,7 @@ Hook SFX covers tool success/failure/start. Voice should **add meaning**, not du
 
 - **Voice:** what happened + what you'll do next. No traces.
 - **Visual:** key error excerpt + recovery steps.
-- If `echocoding say` fails: continue text-only, note once "Voice unavailable", don't retry.
+- If `npx echocoding say` fails: continue text-only, note once "Voice unavailable", don't retry.
 
 ### 9. Emotion Tags
 
@@ -131,13 +131,13 @@ Available: `<laugh>` `<chuckle>` `<sigh>` `<gasp>` `<cough>` `<yawn>` `<groan>`
 
 ### 10. Safe Quoting
 
-`echocoding say` calls: single-line, avoid single quotes (rephrase), no newlines.
+`npx echocoding say` calls: single-line, avoid single quotes (rephrase), no newlines.
 
 ---
 
 ## VOICE_MODE=OFF — Normal Mode
 
-Standard text output (full Markdown, detailed explanations). No `echocoding say` unless user explicitly asks.
+Standard text output (full Markdown, detailed explanations). No `npx echocoding say` unless user explicitly asks.
 
 ---
 
@@ -151,5 +151,5 @@ Standard text output (full Markdown, detailed explanations). No `echocoding say`
 
 ## Voice Configuration
 
-- Suggest `echocoding studio` for voice/SFX preview and settings (103 speakers, volume, speed, language)
-- CLI fallback: `echocoding config set tts.voice <sid>`
+- Suggest `npx echocoding studio` for voice/SFX preview and settings (103 speakers, volume, speed, language)
+- CLI fallback: `npx echocoding config set tts.voice <sid>`
