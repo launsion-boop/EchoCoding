@@ -51,13 +51,13 @@ esac
 case "$LEVEL" in
   balanced)
     emit_reminder \
-      "<user-prompt-submit-hook>🔊【必须】完成任务/代码改动/Bug修复/重要结论 → 立即 echocoding say 播报一句摘要，再输出文字。不能只回复文字不播报。⚠️ 反问用户必须用 echocoding ask，禁止文字提问。ASK 流程：ask 返回后 HUD 保持开→满意答案后 ask-end 关闭→继续；忘关 60s 自动关。</user-prompt-submit-hook>" \
-      "EchoCoding 平衡模式【必须】：完成任务/代码改动/结论 → 先 \`echocoding say\` 播报，再输出文字，不能只回文字。⚠️ 反问必须 \`echocoding ask\`。ask 返回后 HUD 保持 → 满意后 \`ask-end\` 关→继续；忘关 60s 自动关。"
+      "<user-prompt-submit-hook>🔊【必须】完成任务/代码改动/Bug修复/重要结论 → Bash调用 \`npx echocoding say \"摘要\"\` 播报，再输出文字。⚠️ 需要反问用户 → Bash调用 \`npx echocoding ask \"问题\"\`，严禁文字提问。ASK流程：ask返回→HUD保持开→满意后Bash调用 \`npx echocoding ask-end\` 关闭→继续；60s自动关。</user-prompt-submit-hook>" \
+      "EchoCoding 平衡模式【必须】：完成任务/结论 → 先 Bash: \`npx echocoding say \"摘要\"\`，再输出文字。⚠️ 反问用户 → Bash: \`npx echocoding ask \"问题\"\`（禁止文字提问）。答案满意后 Bash: \`npx echocoding ask-end\` 关闭 HUD。"
     ;;
   verbose)
     emit_reminder \
-      "<user-prompt-submit-hook>⚠️ 强语音模式：每个 turn 都必须 echocoding say，包括纯工具调用。绝对不能静默。</user-prompt-submit-hook>" \
-      "EchoCoding 强语音模式已开启：这个 turn 必须先执行 \`echocoding say\`，再输出文字；即使只是工具调用也不能静默。"
+      "<user-prompt-submit-hook>⚠️ 强语音模式：每个 turn 必须 Bash调用 \`npx echocoding say \"摘要\"\`，绝对不能静默。需要提问 → \`npx echocoding ask \"问题\"\`，严禁文字提问。</user-prompt-submit-hook>" \
+      "EchoCoding 强语音模式：必须 Bash: \`npx echocoding say \"摘要\"\`，不能静默。提问 → \`npx echocoding ask \"问题\"\`。"
     ;;
   # minimal: no reminder needed
 esac

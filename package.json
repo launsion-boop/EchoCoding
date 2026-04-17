@@ -1,6 +1,6 @@
 {
   "name": "echocoding",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "Immersive audio feedback for Vibe Coding — make your AI coding agent talk, listen, and feel alive",
   "type": "module",
   "main": "dist/src/index.js",
