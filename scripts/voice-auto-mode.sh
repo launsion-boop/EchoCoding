@@ -31,9 +31,9 @@ LEVEL_NAME="平衡"
 cat <<EOF
 <session-start-hook>🎙️ EchoCoding 自动语音模式已开启（${LEVEL_NAME}档）。
 规则：
-- 有重要信息/结论时先 echocoding say 一句播报，再输出文字
-- 需要反问用户时必须用 echocoding ask（不能文字提问）
-- ask 返回后 HUD 保持开着 → 满意答案后 ask-end 关闭 → 继续执行
+- 有重要信息/结论时先 Bash 调用 \`npx echocoding say "摘要"\` 播报，再输出文字
+- 需要反问用户时必须 Bash 调用 \`npx echocoding ask "问题"\`（不能文字提问）
+- ask 返回后 HUD 保持开着 → 满意答案后 Bash 调用 \`npx echocoding ask-end\` 关闭 → 继续执行
 - 答案不够直接再 ask；忘关 60s 自动关
 - [timeout]/[error] → HUD 自动关闭，无需 ask-end
 用户可随时输入 /echocoding minimal/balanced/verbose 切换档位，或 /echocoding off 关闭语音。
