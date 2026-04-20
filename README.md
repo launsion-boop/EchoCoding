@@ -3,7 +3,7 @@
   <p align="center"><strong>Make your AI coding agent talk, listen, and feel alive.</strong></p>
   <p align="center">
     <a href="https://www.npmjs.com/package/echocoding"><img src="https://img.shields.io/npm/v/echocoding.svg" alt="npm version"></a>
-    <a href="https://github.com/EchoClaw/echocoding/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/echocoding.svg" alt="license"></a>
+    <a href="https://github.com/launsion-boop/EchoCoding/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/echocoding.svg" alt="license"></a>
     <a href="https://www.npmjs.com/package/echocoding"><img src="https://img.shields.io/node/v/echocoding.svg" alt="node version"></a>
   </p>
 </p>
@@ -286,7 +286,7 @@ sfx:
 ## Development
 
 ```bash
-git clone https://github.com/EchoClaw/echocoding.git
+git clone https://github.com/launsion-boop/EchoCoding.git
 cd echocoding
 npm install
 npm run build
@@ -578,7 +578,7 @@ sfx:
 ## 开发
 
 ```bash
-git clone https://github.com/EchoClaw/echocoding.git
+git clone https://github.com/launsion-boop/EchoCoding.git
 cd echocoding
 npm install
 npm run build

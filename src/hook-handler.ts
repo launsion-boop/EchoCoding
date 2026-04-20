@@ -7,6 +7,7 @@ const AMBIENT_INTERVALS = {
   thinking: 3000,
   heartbeat: 1600,
   typing: 900,
+  compact: 3000,
 } as const;
 const THINKING_CUE_MIN_INTERVAL_MS = 450;
 let lastThinkingCueAt = 0;
@@ -113,6 +114,7 @@ export function handleHookEvent(event: HookEvent): void {
     case 'PreCompact':
       _stopAmbient?.();
       playSfx('compact');
+      _startAmbient?.('compact', AMBIENT_INTERVALS.compact);
       break;
 
     default:
