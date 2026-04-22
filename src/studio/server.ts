@@ -17,11 +17,13 @@ import { createRequire } from 'node:module';
 
 const _require = createRequire(import.meta.url);
 
-// Studio must always write global config.
-// Explicitly force runtime client to `default` so CODEX_/CLAUDE_ env markers
-// don't scope writes into clients.codex / clients.claude.
-process.env.ECHOCODING_CLIENT = 'default';
-process.env.ECHOCODING_HOOK_CLIENT = 'default';
+function forceStudioGlobalClientContext(): void {
+  // Studio must always read/write global config.
+  // Force runtime client to `default` so CODEX_/CLAUDE_ env markers
+  // don't scope writes into clients.codex / clients.claude.
+  process.env.ECHOCODING_CLIENT = 'default';
+  process.env.ECHOCODING_HOOK_CLIENT = 'default';
+}
 
 const TEMP_DIR = path.join(os.tmpdir(), 'echocoding-studio');
 const STUDIO_PREVIEW_TEXT = {
@@ -605,6 +607,10 @@ async function findAvailablePort(preferred?: number): Promise<number> {
 }
 
 export async function startStudio(preferredPort?: number): Promise<void> {
+  // Scope client context override to Studio runtime only.
+  // Avoid top-level side effects that would affect non-studio CLI commands.
+  forceStudioGlobalClientContext();
+
   // Pre-load TTS model so first preview is instant
   console.log('[echocoding] Loading TTS model...');
   const tts = getTtsInstance();
