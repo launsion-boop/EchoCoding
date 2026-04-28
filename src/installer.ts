@@ -39,10 +39,26 @@ interface CodexHooksFile {
 
 const CLAUDE_SETTINGS_PATH = path.join(os.homedir(), '.claude', 'settings.json');
 
+function resolveRuntimeNodePath(): string {
+  const stableCandidates = [
+    '/opt/homebrew/bin/node', // Apple Silicon Homebrew
+    '/usr/local/bin/node',    // Intel Homebrew / common global path
+  ];
+  for (const candidate of stableCandidates) {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {
+      // Try next candidate.
+    }
+  }
+  return process.execPath;
+}
+
 function getHookCommand(): string {
   const hookScript = path.join(getPackageRoot(), 'dist', 'bin', 'echocoding-hook.js');
   // Use absolute path to node — hook env may not have /opt/homebrew/bin in PATH
-  const nodePath = process.execPath;
+  const nodePath = resolveRuntimeNodePath();
   return `${nodePath} ${hookScript}`;
 }
 
@@ -274,12 +290,12 @@ function getCodexVoiceReminderCommand(): string {
 
 function getCodexHookCommand(): string {
   const hookScript = path.join(getPackageRoot(), 'dist', 'bin', 'echocoding-hook.js');
-  return `ECHOCODING_CLIENT=codex ${shellQuote(process.execPath)} ${shellQuote(hookScript)}`;
+  return `ECHOCODING_CLIENT=codex ${shellQuote(resolveRuntimeNodePath())} ${shellQuote(hookScript)}`;
 }
 
 function getCodexAutoStartCommand(): string {
   const script = path.join(getPackageRoot(), 'scripts', 'auto-start.sh');
-  return `ECHOCODING_CLIENT=codex ECHOCODING_NODE=${shellQuote(process.execPath)} bash ${shellQuote(script)}`;
+  return `ECHOCODING_CLIENT=codex ECHOCODING_NODE=${shellQuote(resolveRuntimeNodePath())} bash ${shellQuote(script)}`;
 }
 
 function getCodexVoiceAutoModeCommand(): string {

@@ -95,8 +95,7 @@ function upsertClaudeManagedGroup(
 
 function getHookCommand(): string {
   const hookScript = path.join(getPackageRoot(), 'dist', 'bin', 'echocoding-hook.js');
-  // Use absolute path to node — hook env may not have /opt/homebrew/bin in PATH
-  const nodePath = process.execPath;
+  const nodePath = resolveRuntimeNodePath();
   return `ECHOCODING_CLIENT=claude ${nodePath} ${hookScript}`;
 }
 
@@ -117,9 +116,25 @@ function getVoiceAutoModeCommand(): string {
 
 function getAutoStartCommand(): string {
   const script = path.join(getPackageRoot(), 'scripts', 'auto-start.sh');
-  const nodePath = process.execPath;
+  const nodePath = resolveRuntimeNodePath();
   // Pass Node path as env so auto-start.sh doesn't need to hunt for it
   return `ECHOCODING_CLIENT=claude ECHOCODING_NODE=${nodePath} bash ${script}`;
+}
+
+function resolveRuntimeNodePath(): string {
+  const stableCandidates = [
+    '/opt/homebrew/bin/node', // Apple Silicon Homebrew
+    '/usr/local/bin/node',    // Intel Homebrew / common global path
+  ];
+  for (const candidate of stableCandidates) {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {
+      // Try next candidate.
+    }
+  }
+  return process.execPath;
 }
 
 // --- Claude Code adapter ---
