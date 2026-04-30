@@ -299,7 +299,9 @@ function isClientAlive(clientId: 'claude' | 'codex'): boolean {
       process.kill(ownerPid, 0);
       return true;
     } catch {
-      // fall through to process-list heuristic
+      // Owner PID was explicitly bound at daemon start. If it's gone, treat the
+      // client session as ended and shut down immediately.
+      return false;
     }
   }
 

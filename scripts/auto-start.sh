@@ -110,7 +110,7 @@ daemon_should_restart() {
   [ -f "$DAEMON" ] || return 1
   command -v python3 >/dev/null 2>&1 || return 1
 
-  DAEMON_PID="$pid" DAEMON_SCRIPT="$DAEMON" python3 - <<'PY' >/dev/null 2>&1
+  DAEMON_PID="$pid" DAEMON_SCRIPT="$DAEMON" DAEMON_CLIENT="$CLIENT" python3 - <<'PY' >/dev/null 2>&1
 import os
 import re
 import subprocess
@@ -118,6 +118,7 @@ from datetime import datetime
 
 pid_raw = os.environ.get("DAEMON_PID", "").strip()
 expected = os.path.realpath(os.environ.get("DAEMON_SCRIPT", "").strip())
+client = (os.environ.get("DAEMON_CLIENT") or "").strip().lower()
 if not pid_raw or not expected:
     raise SystemExit(1)
 
@@ -130,12 +131,19 @@ if pid < 2:
 
 try:
     cmd = subprocess.check_output(
-        ["ps", "-p", str(pid), "-o", "command="],
+        ["ps", "eww", "-p", str(pid), "-o", "command="],
         universal_newlines=True,
     ).strip()
 except Exception:
-    # Uninspectable process: don't force restart.
-    raise SystemExit(1)
+    # Fallback to plain command output on platforms where `ps eww` is unavailable.
+    try:
+        cmd = subprocess.check_output(
+        ["ps", "-p", str(pid), "-o", "command="],
+        universal_newlines=True,
+        ).strip()
+    except Exception:
+        # Uninspectable process: don't force restart.
+        raise SystemExit(1)
 
 if not cmd:
     # PID exists but no command output: restart defensively.
@@ -146,6 +154,10 @@ expected_norm = os.path.normcase(os.path.normpath(expected))
 
 # If daemon isn't launched from current project dist path, force restart.
 if expected_norm not in cmd_norm:
+    raise SystemExit(0)
+
+# For client-scoped daemons we require owner PID to be present in env.
+if client in ("claude", "codex") and "echocoding_owner_pid=" not in cmd.lower():
     raise SystemExit(0)
 
 try:
@@ -193,6 +205,44 @@ raise SystemExit(1)
 PY
 }
 
+resolve_owner_pid() {
+  [ "$CLIENT" = "claude" ] || [ "$CLIENT" = "codex" ] || return 1
+  command -v ps >/dev/null 2>&1 || return 1
+
+  local client_pattern=""
+  if [ "$CLIENT" = "claude" ]; then
+    client_pattern='(^|/)claude(\.app/.*/macos/claude)?([[:space:]]|$)|claude-code'
+  else
+    client_pattern='(^|/)codex(\.app/.*/macos/codex)?([[:space:]]|$)|/codex[[:space:]]+app-server'
+  fi
+
+  local pid="${PPID:-}"
+  local hop=0
+  while [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null && [ $hop -lt 8 ]; do
+    local cmd
+    cmd="$(ps -p "$pid" -o command= 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+    if [ -n "$cmd" ] && printf '%s' "$cmd" | grep -Eq "$client_pattern"; then
+      printf '%s' "$pid"
+      return 0
+    fi
+    pid="$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d '[:space:]')"
+    hop=$((hop + 1))
+  done
+
+  # Fallback: most recent client main process.
+  local candidate=""
+  if [ "$CLIENT" = "claude" ]; then
+    candidate="$(pgrep -fn "/claude\\.app/.*/macos/claude|/\\.local/bin/claude" 2>/dev/null || true)"
+  else
+    candidate="$(pgrep -fn "/codex\\.app/.*/macos/codex|/codex app-server" 2>/dev/null || true)"
+  fi
+  if [ -n "$candidate" ] && [ "$candidate" -gt 1 ] 2>/dev/null; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+  return 1
+}
+
 if [ "$CLIENT" = "default" ]; then
   PIDFILE="$HOME/.echocoding/daemon.pid"
   SOCK="/tmp/echocoding.sock"
@@ -229,9 +279,18 @@ fi
 [ -x "$NODE" ] || exit 0
 
 export ECHOCODING_CLIENT="$CLIENT"
-# Parent PID is usually the client hook runner process (Claude/Codex). Pass it
-# to daemon so it can stop itself when the owning client exits.
-export ECHOCODING_OWNER_PID="${PPID:-}"
+
+# Resolve a stable client owner PID when possible. This lets the daemon shut
+# itself down promptly when the Claude/Codex process exits.
+OWNER_PID=""
+if [ "$CLIENT" = "claude" ] || [ "$CLIENT" = "codex" ]; then
+  OWNER_PID="$(resolve_owner_pid || true)"
+fi
+if [ -n "$OWNER_PID" ]; then
+  export ECHOCODING_OWNER_PID="$OWNER_PID"
+else
+  unset ECHOCODING_OWNER_PID
+fi
 
 # Start daemon detached via Node child_process.
 # This is more robust than plain nohup in hook runners that clean up child jobs.
