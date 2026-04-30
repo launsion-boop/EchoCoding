@@ -9,6 +9,14 @@ case "$CLIENT_RAW" in
   *) CLIENT="default" ;;
 esac
 
+# Resolve paths once so health checks can compare against the expected daemon.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Node path: prefer ECHOCODING_NODE, then common locations
+NODE="${ECHOCODING_NODE:-$(command -v node 2>/dev/null || echo /opt/homebrew/bin/node)}"
+DAEMON="$PROJECT_DIR/dist/bin/echocoding-daemon.js"
+
 repair_codex_hooks_config() {
   # Codex hooks occasionally keep stale absolute paths (e.g. moved hub dir,
   # upgraded Homebrew node Cellar path), which can cause hook exit code 127.
@@ -96,6 +104,78 @@ hooks_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", enc
 PY
 }
 
+daemon_should_restart() {
+  local pid="$1"
+  [ -n "$pid" ] || return 1
+  [ -f "$DAEMON" ] || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+
+  DAEMON_PID="$pid" DAEMON_SCRIPT="$DAEMON" python3 - <<'PY' >/dev/null 2>&1
+import os
+import re
+import subprocess
+import time
+from datetime import datetime
+
+pid_raw = os.environ.get("DAEMON_PID", "").strip()
+expected = os.path.realpath(os.environ.get("DAEMON_SCRIPT", "").strip())
+if not pid_raw or not expected:
+    raise SystemExit(1)
+
+try:
+    pid = int(pid_raw)
+except Exception:
+    raise SystemExit(1)
+if pid < 2:
+    raise SystemExit(1)
+
+try:
+    cmd = subprocess.check_output(["ps", "-p", str(pid), "-o", "command="], text=True).strip()
+except Exception:
+    # Uninspectable process: don't force restart.
+    raise SystemExit(1)
+
+if not cmd:
+    # PID exists but no command output: restart defensively.
+    raise SystemExit(0)
+
+cmd_norm = cmd.replace("\\", "/")
+expected_norm = expected.replace("\\", "/")
+
+# If daemon isn't launched from current project dist path, force restart.
+if expected_norm not in cmd_norm:
+    raise SystemExit(0)
+
+try:
+    started_raw = subprocess.check_output(["ps", "-p", str(pid), "-o", "lstart="], text=True).strip()
+except Exception:
+    raise SystemExit(1)
+
+if not started_raw:
+    raise SystemExit(1)
+
+started_compact = re.sub(r"\s+", " ", started_raw).strip()
+try:
+    started_dt = datetime.strptime(started_compact, "%a %b %d %H:%M:%S %Y")
+except Exception:
+    # Date parse failed (locale/format mismatch): keep process.
+    raise SystemExit(1)
+
+try:
+    daemon_mtime = os.path.getmtime(expected)
+except Exception:
+    raise SystemExit(1)
+
+started_ts = time.mktime(started_dt.timetuple())
+
+# Restart when daemon process predates current daemon script build.
+if daemon_mtime > (started_ts + 1):
+    raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
 if [ "$CLIENT" = "default" ]; then
   PIDFILE="$HOME/.echocoding/daemon.pid"
   SOCK="/tmp/echocoding.sock"
@@ -108,17 +188,16 @@ fi
 repair_codex_hooks_config
 
 # Quick check: daemon already running?
-if [ -S "$SOCK" ] && [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
-  exit 0
+EXISTING_PID="$(cat "$PIDFILE" 2>/dev/null || true)"
+if [ -S "$SOCK" ] && [ -n "$EXISTING_PID" ] && kill -0 "$EXISTING_PID" 2>/dev/null; then
+  if daemon_should_restart "$EXISTING_PID"; then
+    kill "$EXISTING_PID" >/dev/null 2>&1 || true
+    sleep 0.2
+    rm -f "$SOCK" "$PIDFILE" >/dev/null 2>&1 || true
+  else
+    exit 0
+  fi
 fi
-
-# Resolve paths — installer writes NODE_PATH and DAEMON_SCRIPT as env or we detect
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-
-# Node path: prefer ECHOCODING_NODE, then common locations
-NODE="${ECHOCODING_NODE:-$(command -v node 2>/dev/null || echo /opt/homebrew/bin/node)}"
-DAEMON="$PROJECT_DIR/dist/bin/echocoding-daemon.js"
 
 [ -f "$DAEMON" ] || exit 0
 [ -x "$NODE" ] || exit 0
