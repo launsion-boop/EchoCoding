@@ -114,7 +114,6 @@ daemon_should_restart() {
 import os
 import re
 import subprocess
-import time
 from datetime import datetime
 
 pid_raw = os.environ.get("DAEMON_PID", "").strip()
@@ -130,7 +129,10 @@ if pid < 2:
     raise SystemExit(1)
 
 try:
-    cmd = subprocess.check_output(["ps", "-p", str(pid), "-o", "command="], text=True).strip()
+    cmd = subprocess.check_output(
+        ["ps", "-p", str(pid), "-o", "command="],
+        universal_newlines=True,
+    ).strip()
 except Exception:
     # Uninspectable process: don't force restart.
     raise SystemExit(1)
@@ -139,37 +141,52 @@ if not cmd:
     # PID exists but no command output: restart defensively.
     raise SystemExit(0)
 
-cmd_norm = cmd.replace("\\", "/")
-expected_norm = expected.replace("\\", "/")
+cmd_norm = os.path.normcase(os.path.normpath(cmd))
+expected_norm = os.path.normcase(os.path.normpath(expected))
 
 # If daemon isn't launched from current project dist path, force restart.
 if expected_norm not in cmd_norm:
     raise SystemExit(0)
 
 try:
-    started_raw = subprocess.check_output(["ps", "-p", str(pid), "-o", "lstart="], text=True).strip()
+    elapsed_raw = subprocess.check_output(
+        ["ps", "-p", str(pid), "-o", "etime="],
+        env={**os.environ, "LC_ALL": "C"},
+        universal_newlines=True,
+    ).strip()
 except Exception:
     raise SystemExit(1)
 
-if not started_raw:
+if not elapsed_raw:
     raise SystemExit(1)
 
-started_compact = re.sub(r"\s+", " ", started_raw).strip()
-try:
-    started_dt = datetime.strptime(started_compact, "%a %b %d %H:%M:%S %Y")
-except Exception:
-    # Date parse failed (locale/format mismatch): keep process.
-    raise SystemExit(1)
+elapsed = elapsed_raw.strip()
+match = re.fullmatch(r"(?:(\d+)-)?(\d{1,2}):(\d{2}):(\d{2})", elapsed)
+if match:
+    days = int(match.group(1) or 0)
+    hours = int(match.group(2))
+    minutes = int(match.group(3))
+    seconds = int(match.group(4))
+else:
+    match = re.fullmatch(r"(\d{1,2}):(\d{2})", elapsed)
+    if not match:
+        raise SystemExit(1)
+    days = 0
+    hours = 0
+    minutes = int(match.group(1))
+    seconds = int(match.group(2))
+
+elapsed_seconds = (days * 24 * 3600) + (hours * 3600) + (minutes * 60) + seconds
 
 try:
     daemon_mtime = os.path.getmtime(expected)
 except Exception:
     raise SystemExit(1)
 
-started_ts = time.mktime(started_dt.timetuple())
+started_dt = datetime.now().timestamp() - elapsed_seconds
 
 # Restart when daemon process predates current daemon script build.
-if daemon_mtime > (started_ts + 1):
+if daemon_mtime > (started_dt + 1):
     raise SystemExit(0)
 
 raise SystemExit(1)
@@ -189,10 +206,19 @@ repair_codex_hooks_config
 
 # Quick check: daemon already running?
 EXISTING_PID="$(cat "$PIDFILE" 2>/dev/null || true)"
+EXISTING_PID="$(printf '%s' "$EXISTING_PID" | tr -d '\r\n[:space:]')"
 if [ -S "$SOCK" ] && [ -n "$EXISTING_PID" ] && kill -0 "$EXISTING_PID" 2>/dev/null; then
   if daemon_should_restart "$EXISTING_PID"; then
     kill "$EXISTING_PID" >/dev/null 2>&1 || true
-    sleep 0.2
+    # Ensure old daemon has exited to avoid socket/file races on restart.
+    for _i in 1 2 3 4 5 6 7 8 9 10; do
+      kill -0 "$EXISTING_PID" 2>/dev/null || break
+      sleep 0.2
+    done
+    if kill -0 "$EXISTING_PID" 2>/dev/null; then
+      kill -9 "$EXISTING_PID" >/dev/null 2>&1 || true
+      sleep 0.1
+    fi
     rm -f "$SOCK" "$PIDFILE" >/dev/null 2>&1 || true
   else
     exit 0
