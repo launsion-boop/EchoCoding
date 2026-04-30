@@ -138,8 +138,8 @@ except Exception:
     # Fallback to plain command output on platforms where `ps eww` is unavailable.
     try:
         cmd = subprocess.check_output(
-        ["ps", "-p", str(pid), "-o", "command="],
-        universal_newlines=True,
+            ["ps", "-p", str(pid), "-o", "command="],
+            universal_newlines=True,
         ).strip()
     except Exception:
         # Uninspectable process: don't force restart.
@@ -209,21 +209,27 @@ resolve_owner_pid() {
   [ "$CLIENT" = "claude" ] || [ "$CLIENT" = "codex" ] || return 1
   command -v ps >/dev/null 2>&1 || return 1
 
-  local client_pattern=""
-  if [ "$CLIENT" = "claude" ]; then
-    client_pattern='(^|/)claude(\.app/.*/macos/claude)?([[:space:]]|$)|claude-code'
-  else
-    client_pattern='(^|/)codex(\.app/.*/macos/codex)?([[:space:]]|$)|/codex[[:space:]]+app-server'
-  fi
-
   local pid="${PPID:-}"
   local hop=0
   while [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null && [ $hop -lt 8 ]; do
     local cmd
     cmd="$(ps -p "$pid" -o command= 2>/dev/null | tr '[:upper:]' '[:lower:]')"
-    if [ -n "$cmd" ] && printf '%s' "$cmd" | grep -Eq "$client_pattern"; then
-      printf '%s' "$pid"
-      return 0
+    if [ -n "$cmd" ]; then
+      if [ "$CLIENT" = "claude" ]; then
+        if printf '%s' "$cmd" \
+          | grep -Eq 'claude-code/[^/[:space:]]+/claude\.app/contents/macos/claude[[:space:]].*--output-format[[:space:]]+stream-json'; then
+          # Exclude disclaimer wrapper process.
+          if ! printf '%s' "$cmd" | grep -q '/contents/helpers/disclaimer[[:space:]]'; then
+            printf '%s' "$pid"
+            return 0
+          fi
+        fi
+      else
+        if printf '%s' "$cmd" | grep -Eq '(^|/)codex(\.app/.*/macos/codex)?([[:space:]]|$)|/codex[[:space:]]+app-server'; then
+          printf '%s' "$pid"
+          return 0
+        fi
+      fi
     fi
     pid="$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d '[:space:]')"
     hop=$((hop + 1))
@@ -232,9 +238,16 @@ resolve_owner_pid() {
   # Fallback: most recent client main process.
   local candidate=""
   if [ "$CLIENT" = "claude" ]; then
-    candidate="$(pgrep -fn "/claude\\.app/.*/macos/claude|/\\.local/bin/claude" 2>/dev/null || true)"
+    candidate="$(pgrep -fin "claude-code/.*/claude\\.app/.*/macos/claude .*--output-format stream-json" 2>/dev/null || true)"
+    if [ -n "$candidate" ]; then
+      local ccmd
+      ccmd="$(ps -p "$candidate" -o command= 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+      if printf '%s' "$ccmd" | grep -q '/contents/helpers/disclaimer[[:space:]]'; then
+        candidate=""
+      fi
+    fi
   else
-    candidate="$(pgrep -fn "/codex\\.app/.*/macos/codex|/codex app-server" 2>/dev/null || true)"
+    candidate="$(pgrep -fin "/codex\\.app/.*/macos/codex|/codex app-server" 2>/dev/null || true)"
   fi
   if [ -n "$candidate" ] && [ "$candidate" -gt 1 ] 2>/dev/null; then
     printf '%s' "$candidate"

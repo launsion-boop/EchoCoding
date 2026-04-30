@@ -305,8 +305,13 @@ function isClientAlive(clientId: 'claude' | 'codex'): boolean {
     }
   }
 
+  // Legacy fallback (older daemons started before owner-pid binding):
+  // keep only for Claude CLI worker detection. For Codex, be conservative and
+  // stop to avoid lingering sounds when only GUI/background processes remain.
+  if (clientId === 'codex') return false;
+
   const commandList = readProcessCommands();
-  if (!commandList) return true;
+  if (!commandList) return false;
 
   const matcher = getClientProcessMatcher(clientId);
   return commandList.some((cmd) => matcher.test(cmd));
@@ -329,7 +334,10 @@ function readProcessCommands(): string[] | null {
 
 function getClientProcessMatcher(clientId: 'claude' | 'codex'): RegExp {
   if (clientId === 'claude') {
-    return /(?:^|[\/\s])claude(?:\s|$)|claude-code|claude\.app/;
+    // Match real Claude Code worker processes only (stream-json CLI worker),
+    // and avoid matching the GUI app / crashpad / disclaimer wrappers.
+    return /claude-code\/[^/\s]+\/claude\.app\/contents\/macos\/claude\b.*--output-format\s+stream-json/;
   }
+  // Codex fallback path is currently disabled in isClientAlive.
   return /(?:^|[\/\s])codex(?:\s|$)|codex\.app/;
 }
