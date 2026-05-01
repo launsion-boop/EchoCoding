@@ -11,19 +11,73 @@ import { checkModels, downloadModels, hasEssentialModels } from '../src/download
 import { checkSystemDeps, installMissingDeps } from '../src/deps.js';
 import { startStudio } from '../src/studio/server.js';
 import fs from 'node:fs';
-import { fork } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+function resolvePackageJsonPath(): string | null {
+  const candidates = [
+    path.resolve(__dirname, '..', '..', 'package.json'),
+    path.resolve(__dirname, '..', 'package.json'),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+function resolveCliVersion(): string {
+  const fallback = '0.1.0';
+  try {
+    const packageJsonPath = resolvePackageJsonPath();
+    if (!packageJsonPath) return fallback;
+    const raw = fs.readFileSync(packageJsonPath, 'utf-8');
+    const parsed = JSON.parse(raw) as { version?: string };
+    if (parsed.version && typeof parsed.version === 'string') return parsed.version;
+  } catch {
+    // Keep fallback when package metadata is unavailable.
+  }
+  return fallback;
+}
+
+function buildDaemonForkEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  const runtimeClient = getRuntimeClientId();
+
+  // Keep daemon/client namespace consistent when launched from a scoped client.
+  if (runtimeClient !== 'default' && !env.ECHOCODING_CLIENT) {
+    env.ECHOCODING_CLIENT = runtimeClient;
+  }
+
+  // Bind daemon lifetime to current terminal owner when possible.
+  if ((runtimeClient === 'claude' || runtimeClient === 'codex') && !env.ECHOCODING_OWNER_PID) {
+    const parentPid = process.ppid;
+    if (Number.isInteger(parentPid) && parentPid > 1) {
+      env.ECHOCODING_OWNER_PID = String(parentPid);
+    }
+  }
+
+  return env;
+}
+
+function spawnDaemonDetached(daemonScript: string): void {
+  const child = spawn(process.execPath, [daemonScript], {
+    detached: true,
+    stdio: 'ignore',
+    env: buildDaemonForkEnv(),
+  });
+  child.unref();
+}
+
 const program = new Command();
 
 program
   .name('echocoding')
   .description('Immersive audio feedback for Vibe Coding')
-  .version('0.1.0');
+  .version(resolveCliVersion());
 
 // --- install ---
 program
@@ -126,8 +180,7 @@ program
       const status = isDaemonRunning();
       if (!status.running) {
         const daemonScript = path.resolve(__dirname, 'echocoding-daemon.js');
-        const child = fork(daemonScript, [], { detached: true, stdio: 'ignore' });
-        child.unref();
+        spawnDaemonDetached(daemonScript);
         // Wait for daemon to be ready
         for (let i = 0; i < 30; i++) {
           await new Promise((r) => setTimeout(r, 100));
@@ -186,11 +239,7 @@ program
 
     // Fork daemon as a detached background process
     const daemonScript = path.resolve(__dirname, 'echocoding-daemon.js');
-    const child = fork(daemonScript, [], {
-      detached: true,
-      stdio: 'ignore',
-    });
-    child.unref();
+    spawnDaemonDetached(daemonScript);
 
     // Poll until daemon is ready (pid exists + socket reachable)
     const maxWait = 3000;
@@ -203,7 +252,6 @@ program
         const check = isDaemonRunning();
         if (check.running && await pingDaemon()) {
           console.log(`[echocoding] Daemon started (pid: ${check.pid})`);
-          checkForUpdate(); // fire-and-forget, don't block
           return;
         }
       }
@@ -508,12 +556,14 @@ function sleep(ms: number): Promise<void> {
  */
 async function checkForUpdate(): Promise<void> {
   try {
-    const pkgPath = path.resolve(__dirname, '..', '..', 'package.json');
+    const pkgPath = resolvePackageJsonPath();
+    if (!pkgPath) return;
     const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8')) as { version: string };
     const current = pkg.version;
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 3000);
+    timer.unref?.();
     const resp = await fetch('https://registry.npmjs.org/echocoding/latest', {
       signal: controller.signal,
       headers: { Accept: 'application/json' },
