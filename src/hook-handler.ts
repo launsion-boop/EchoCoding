@@ -301,7 +301,7 @@ type ToolUseKind = 'typing' | 'read' | 'search' | 'notification' | 'working';
 
 function detectToolUseKind(event: HookEvent): ToolUseKind {
   const toolName = (event.tool_name ?? '').toLowerCase();
-  if (isToolMatch(toolName, ['edit', 'apply_patch', 'write'])) return 'typing';
+  if (isToolMatch(toolName, ['edit', 'apply_patch', 'write', 'multiedit', 'multi_edit'])) return 'typing';
   if (isToolMatch(toolName, ['read', 'open', 'find', 'view_image', 'screenshot', 'read_thread_terminal'])) return 'read';
   if (isToolMatch(toolName, ['glob', 'grep', 'search_query', 'image_query', 'fuzzy_file_search'])) return 'search';
   if (isToolMatch(toolName, ['parallel'])) return detectParallelToolKind(event);
@@ -418,7 +418,7 @@ function detectParallelUseKind(use: Record<string, unknown>): ToolUseKind {
   const tool = recipient.split('.').pop() ?? recipient;
   const parameters = asRecord(use.parameters) ?? {};
 
-  if (isToolMatch(tool, ['apply_patch', 'write', 'edit'])) return 'typing';
+  if (isToolMatch(tool, ['apply_patch', 'write', 'edit', 'multiedit', 'multi_edit'])) return 'typing';
   if (isToolMatch(tool, ['read', 'open', 'find', 'view_image', 'screenshot', 'read_thread_terminal'])) return 'read';
   if (isToolMatch(tool, ['grep', 'glob', 'search_query', 'image_query', 'fuzzy_file_search'])) return 'search';
   if (isToolMatch(tool, ['exec_command', 'bash'])) {

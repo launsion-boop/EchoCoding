@@ -274,6 +274,7 @@ const CODEX_MANAGED_BLOCK_END = '<!-- echocoding-voice-mode:end -->';
 const CODEX_LEGACY_MARKER = '<!-- echocoding-voice-mode -->';
 const CODEX_HOOKS_FEATURE_START = '# echocoding-codex-hooks:start';
 const CODEX_HOOKS_FEATURE_END = '# echocoding-codex-hooks:end';
+const CODEX_TYPING_TOOL_MATCHER = 'apply_patch|Edit|Write|MultiEdit';
 const CODEX_LOW_NOISE_HOOK_EVENTS = ['Notification', 'Stop', 'SubagentStart', 'SubagentStop', 'PreCompact'];
 const CODEX_LEGACY_TOOL_HOOK_EVENTS = ['PreToolUse', 'PostToolUse'];
 const CODEX_LEGACY_BLOCK = [
@@ -551,6 +552,18 @@ function upsertCodexHooks(config: CodexHooksFile): CodexHooksFile {
 
   for (const eventName of CODEX_LEGACY_TOOL_HOOK_EVENTS) {
     removeCodexManagedEventHooks(next.hooks!, eventName, ['echocoding-hook']);
+  }
+
+  for (const eventName of CODEX_LEGACY_TOOL_HOOK_EVENTS) {
+    upsertCodexManagedGroup(next.hooks!, eventName, ['echocoding-hook'], {
+      matcher: CODEX_TYPING_TOOL_MATCHER,
+      hooks: [
+        {
+          type: 'command',
+          command: getCodexHookCommand(),
+        },
+      ],
+    });
   }
 
   for (const eventName of CODEX_LOW_NOISE_HOOK_EVENTS) {

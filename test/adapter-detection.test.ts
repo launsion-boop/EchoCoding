@@ -159,6 +159,18 @@ test('codex adapter reports integrated only after skill, instructions, hooks, an
               ],
             },
           ],
+          PreToolUse: [
+            {
+              matcher: 'apply_patch|Edit|Write|MultiEdit',
+              hooks: [{ type: 'command', command: 'node /tmp/echocoding-hook.js' }],
+            },
+          ],
+          PostToolUse: [
+            {
+              matcher: 'apply_patch|Edit|Write|MultiEdit',
+              hooks: [{ type: 'command', command: 'node /tmp/echocoding-hook.js' }],
+            },
+          ],
           Stop: [
             {
               hooks: [{ type: 'command', command: 'node /tmp/echocoding-hook.js' }],
