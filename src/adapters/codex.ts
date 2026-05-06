@@ -52,7 +52,7 @@ function hasManagedHooks(): boolean {
     const hasReminder = userPromptSubmit.some((group) =>
       (group.hooks ?? []).some((hook) => hook.command?.includes('voice-reminder')),
     );
-    const hasHookPipeline = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse'].every((eventName) =>
+    const hasHookPipeline = ['SessionStart', 'UserPromptSubmit', 'Stop'].every((eventName) =>
       (parsed.hooks?.[eventName] ?? []).some((group) =>
         (group.hooks ?? []).some((hook) => hook.command?.includes('echocoding-hook')),
       ),

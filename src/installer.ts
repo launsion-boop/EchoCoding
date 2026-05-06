@@ -274,6 +274,8 @@ const CODEX_MANAGED_BLOCK_END = '<!-- echocoding-voice-mode:end -->';
 const CODEX_LEGACY_MARKER = '<!-- echocoding-voice-mode -->';
 const CODEX_HOOKS_FEATURE_START = '# echocoding-codex-hooks:start';
 const CODEX_HOOKS_FEATURE_END = '# echocoding-codex-hooks:end';
+const CODEX_LOW_NOISE_HOOK_EVENTS = ['Notification', 'Stop', 'SubagentStart', 'SubagentStop', 'PreCompact'];
+const CODEX_LEGACY_TOOL_HOOK_EVENTS = ['PreToolUse', 'PostToolUse'];
 const CODEX_LEGACY_BLOCK = [
   '## EchoCoding Voice Mode',
   'When user says "/echocoding" or "voice mode on", run `echocoding start` and follow the voice mode rules in the echocoding skill.',
@@ -547,7 +549,11 @@ function upsertCodexHooks(config: CodexHooksFile): CodexHooksFile {
     ],
   });
 
-  for (const eventName of ['PreToolUse', 'PostToolUse', 'Notification', 'Stop', 'SubagentStart', 'SubagentStop', 'PreCompact']) {
+  for (const eventName of CODEX_LEGACY_TOOL_HOOK_EVENTS) {
+    removeCodexManagedEventHooks(next.hooks!, eventName, ['echocoding-hook']);
+  }
+
+  for (const eventName of CODEX_LOW_NOISE_HOOK_EVENTS) {
     upsertCodexManagedGroup(next.hooks!, eventName, ['echocoding-hook'], {
       hooks: [
         {
@@ -559,6 +565,34 @@ function upsertCodexHooks(config: CodexHooksFile): CodexHooksFile {
   }
 
   return next;
+}
+
+function removeCodexManagedEventHooks(
+  hooks: Record<string, CodexHookMatcher[]>,
+  eventName: string,
+  managedCommandNeedles: string[],
+): void {
+  const groups = hooks[eventName];
+  if (!groups) return;
+
+  const retained = groups
+    .map((group) => {
+      const retainedHooks = group.hooks.filter(
+        (hook) => !managedCommandNeedles.some((needle) => hook.command.includes(needle)),
+      );
+      if (retainedHooks.length === 0) return null;
+      return {
+        ...group,
+        hooks: retainedHooks,
+      };
+    })
+    .filter((group): group is CodexHookMatcher => group !== null);
+
+  if (retained.length > 0) {
+    hooks[eventName] = retained;
+  } else {
+    delete hooks[eventName];
+  }
 }
 
 function removeCodexHooks(config: CodexHooksFile): CodexHooksFile {

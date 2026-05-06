@@ -159,12 +159,7 @@ test('codex adapter reports integrated only after skill, instructions, hooks, an
               ],
             },
           ],
-          PreToolUse: [
-            {
-              hooks: [{ type: 'command', command: 'node /tmp/echocoding-hook.js' }],
-            },
-          ],
-          PostToolUse: [
+          Stop: [
             {
               hooks: [{ type: 'command', command: 'node /tmp/echocoding-hook.js' }],
             },

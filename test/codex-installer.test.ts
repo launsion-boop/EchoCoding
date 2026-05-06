@@ -77,8 +77,8 @@ test('installCodex writes a Codex skill directory and migrates legacy instructio
   const hooks = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
   assert.equal(Array.isArray(hooks.hooks?.SessionStart), true);
   assert.equal(Array.isArray(hooks.hooks?.UserPromptSubmit), true);
-  assert.equal(Array.isArray(hooks.hooks?.PreToolUse), true);
-  assert.equal(Array.isArray(hooks.hooks?.PostToolUse), true);
+  assert.equal(hooks.hooks?.PreToolUse, undefined);
+  assert.equal(hooks.hooks?.PostToolUse, undefined);
   assert.equal(Array.isArray(hooks.hooks?.Notification), true);
   assert.equal(Array.isArray(hooks.hooks?.Stop), true);
   assert.equal(Array.isArray(hooks.hooks?.SubagentStart), true);
@@ -94,14 +94,6 @@ test('installCodex writes a Codex skill directory and migrates legacy instructio
   assert.match(
     sessionStartCommands,
     /ECHOCODING_CLIENT=codex .*auto-start\.sh/,
-  );
-  assert.match(
-    hooks.hooks.PreToolUse[0].hooks[0].command,
-    /ECHOCODING_CLIENT=codex .*echocoding-hook\.js/,
-  );
-  assert.match(
-    hooks.hooks.PostToolUse[0].hooks[0].command,
-    /ECHOCODING_CLIENT=codex .*echocoding-hook\.js/,
   );
   assert.equal(
     hooks.hooks.SessionStart.find((g: { hooks: Array<{ command?: string; statusMessage?: string }> }) =>
@@ -171,6 +163,30 @@ test('installCodex is idempotent and uninstallCodex removes managed artifacts wh
               ],
             },
           ],
+          PreToolUse: [
+            {
+              hooks: [
+                {
+                  type: 'command',
+                  command: 'node /tmp/echocoding-hook.js',
+                },
+                {
+                  type: 'command',
+                  command: '/usr/bin/env unrelated-pre-tool',
+                },
+              ],
+            },
+          ],
+          PostToolUse: [
+            {
+              hooks: [
+                {
+                  type: 'command',
+                  command: 'node /tmp/echocoding-hook.js',
+                },
+              ],
+            },
+          ],
         },
       },
       null,
@@ -209,8 +225,20 @@ test('installCodex is idempotent and uninstallCodex removes managed artifacts wh
     ),
     true,
   );
-  assert.equal(Array.isArray(hooksAfterInstall.hooks.PreToolUse), true);
-  assert.equal(Array.isArray(hooksAfterInstall.hooks.PostToolUse), true);
+  assert.equal(hooksAfterInstall.hooks.PreToolUse.length, 1);
+  assert.equal(
+    hooksAfterInstall.hooks.PreToolUse[0].hooks.some((h: { command?: string }) =>
+      h.command?.includes('unrelated-pre-tool'),
+    ),
+    true,
+  );
+  assert.equal(
+    hooksAfterInstall.hooks.PreToolUse[0].hooks.some((h: { command?: string }) =>
+      h.command?.includes('echocoding-hook'),
+    ),
+    false,
+  );
+  assert.equal(hooksAfterInstall.hooks.PostToolUse, undefined);
   assert.equal(Array.isArray(hooksAfterInstall.hooks.Notification), true);
   assert.equal(Array.isArray(hooksAfterInstall.hooks.SubagentStart), true);
   assert.equal(Array.isArray(hooksAfterInstall.hooks.SubagentStop), true);
